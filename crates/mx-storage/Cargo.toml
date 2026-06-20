@@ -2,7 +2,24 @@
 name = "mx-storage"
 version = "0.1.0"
 edition = "2021"
-description = "Persistence layer: Postgres (accounts, prekeys, MLS state) and Redis (presence, sessions, queues)."
+description = "Persistence layer: trait abstractions + in-memory impls, with a seam for Postgres/Redis."
 
 [dependencies]
 mx-types = { path = "../mx-types" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync", "macros", "rt"] }
+
+# Optional backends. Gated behind features so the default build needs no live DB.
+# `sqlx` is pulled without compile-time-checked macros (no `macros`/`migrate` features)
+# so the crate compiles offline, with no running Postgres. Real queries live behind
+# `cfg(feature = "postgres")` as a thin skeleton.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid"], optional = true }
+redis = { version = "0.27", default-features = false, features = ["tokio-comp"], optional = true }
+
+[features]
+default = []
+postgres = ["dep:sqlx"]
+redis = ["dep:redis"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "sync", "rt-multi-thread"] }

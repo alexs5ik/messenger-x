@@ -6,3 +6,23 @@ description = "Cryptographic core: PQXDH (hybrid X25519 + ML-KEM) handshake, Dou
 
 [dependencies]
 mx-types = { path = "../mx-types" }
+
+# Classical primitives (dalek v2 family).
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# Post-quantum KEM (NIST FIPS 203 / ML-KEM-768).
+ml-kem = "0.2"
+
+# KDF + hash + AEAD.
+hkdf = "0.12"
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+
+# Randomness. dalek v2 and ml-kem 0.2 both build on rand_core 0.6.
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# Zeroize secret material on drop where convenient.
+zeroize = "1"
+
+[dev-dependencies]

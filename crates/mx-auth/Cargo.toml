@@ -8,3 +8,11 @@ description = "Identity & auth: registration, device keys, prekey-bundle publish
 mx-types = { path = "../mx-types" }
 mx-crypto = { path = "../mx-crypto" }
 mx-storage = { path = "../mx-storage" }
+
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

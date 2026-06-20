@@ -2,9 +2,21 @@
 name = "mx-groups"
 version = "0.1.0"
 edition = "2021"
-description = "Groups & communities: MLS group state, membership changes, roles."
+description = "Groups & communities: MLS-inspired epoch group state, membership changes, roles."
 
 [dependencies]
 mx-types = { path = "../mx-types" }
 mx-crypto = { path = "../mx-crypto" }
 mx-storage = { path = "../mx-storage" }
+
+# State (de)serialization for persistence via mx-storage GroupStore.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Epoch-secret ratchet. HKDF-SHA256 derives each new epoch secret from the previous
+# one plus a per-change "info" label, giving forward secrecy.
+hkdf = "0.12"
+sha2 = "0.10"
+
+# Wipe epoch secrets from memory on drop.
+zeroize = { version = "1", features = ["derive"] }

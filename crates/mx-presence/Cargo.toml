@@ -6,4 +6,3 @@ description = "Ephemeral presence: online status and typing indicators, backed b
 
 [dependencies]
 mx-types = { path = "../mx-types" }
-mx-storage = { path = "../mx-storage" }

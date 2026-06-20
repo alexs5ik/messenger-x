@@ -6,3 +6,7 @@ description = "Tiered AI orchestrator: routes requests to on-device / confidenti
 
 [dependencies]
 mx-types = { path = "../mx-types" }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

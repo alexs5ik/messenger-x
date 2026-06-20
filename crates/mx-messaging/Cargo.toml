@@ -7,3 +7,6 @@ description = "Message delivery: envelope ingest, per-device fan-out, offline qu
 [dependencies]
 mx-types = { path = "../mx-types" }
 mx-storage = { path = "../mx-storage" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
