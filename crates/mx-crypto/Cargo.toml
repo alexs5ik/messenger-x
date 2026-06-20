@@ -1,0 +1,8 @@
+[package]
+name = "mx-crypto"
+version = "0.1.0"
+edition = "2021"
+description = "Cryptographic core: PQXDH (hybrid X25519 + ML-KEM) handshake, Double Ratchet, and MLS group glue."
+
+[dependencies]
+mx-types = { path = "../mx-types" }

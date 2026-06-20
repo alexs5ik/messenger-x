@@ -1,0 +1,22 @@
+# Messenger X — modular monolith (Horizon 1).
+# Domain logic lives in library crates; `mx-server` is the single runnable binary
+# that wires them together. Services can be split out later by load (see design doc §5/§12).
+[workspace]
+resolver = "2"
+members = [
+    "crates/mx-types",
+    "crates/mx-crypto",
+    "crates/mx-storage",
+    "crates/mx-transport",
+    "crates/mx-auth",
+    "crates/mx-messaging",
+    "crates/mx-groups",
+    "crates/mx-presence",
+    "crates/mx-ai",
+    "crates/mx-server",
+]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

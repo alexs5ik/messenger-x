@@ -1,0 +1,6 @@
+# The project root path contains non-ASCII (Cyrillic) characters, which the MinGW GNU
+# linker (ld.exe) cannot handle for build artifacts. Redirect the build directory to an
+# ASCII-only path so linking succeeds. All cargo invocations (local + CI + agents) inherit
+# this automatically.
+[build]
+target-dir = "C:/mx_target"

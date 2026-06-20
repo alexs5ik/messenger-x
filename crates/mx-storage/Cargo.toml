@@ -1,0 +1,8 @@
+[package]
+name = "mx-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Persistence layer: Postgres (accounts, prekeys, MLS state) and Redis (presence, sessions, queues)."
+
+[dependencies]
+mx-types = { path = "../mx-types" }

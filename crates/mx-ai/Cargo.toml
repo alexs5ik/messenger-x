@@ -1,0 +1,8 @@
+[package]
+name = "mx-ai"
+version = "0.1.0"
+edition = "2021"
+description = "Tiered AI orchestrator: routes requests to on-device / confidential-enclave / external-frontier tiers per the envelope rule (design doc §8)."
+
+[dependencies]
+mx-types = { path = "../mx-types" }

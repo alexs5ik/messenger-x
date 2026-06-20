@@ -1,0 +1,5 @@
+[toolchain]
+# This machine has no MSVC/Visual Studio build tools; the working host toolchain is the
+# GNU (MinGW) one. Pin to it so builds use the bundled GCC linker, not MSVC link.exe.
+channel = "stable-x86_64-pc-windows-gnu"
+components = ["rustfmt", "clippy"]

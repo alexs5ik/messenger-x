@@ -1,0 +1,10 @@
+[package]
+name = "mx-auth"
+version = "0.1.0"
+edition = "2021"
+description = "Identity & auth: registration, device keys, prekey-bundle publish/fetch, session tokens."
+
+[dependencies]
+mx-types = { path = "../mx-types" }
+mx-crypto = { path = "../mx-crypto" }
+mx-storage = { path = "../mx-storage" }

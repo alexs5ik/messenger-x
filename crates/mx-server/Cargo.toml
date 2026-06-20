@@ -1,0 +1,20 @@
+[package]
+name = "mx-server"
+version = "0.1.0"
+edition = "2021"
+description = "The runnable Messenger X backend binary: HTTP API + WebSocket gateway wiring all domain crates together."
+
+[[bin]]
+name = "mx"
+path = "src/main.rs"
+
+[dependencies]
+mx-types = { path = "../mx-types" }
+mx-crypto = { path = "../mx-crypto" }
+mx-storage = { path = "../mx-storage" }
+mx-transport = { path = "../mx-transport" }
+mx-auth = { path = "../mx-auth" }
+mx-messaging = { path = "../mx-messaging" }
+mx-groups = { path = "../mx-groups" }
+mx-presence = { path = "../mx-presence" }
+mx-ai = { path = "../mx-ai" }

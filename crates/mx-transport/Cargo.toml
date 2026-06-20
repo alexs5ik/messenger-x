@@ -1,0 +1,8 @@
+[package]
+name = "mx-transport"
+version = "0.1.0"
+edition = "2021"
+description = "Client transport: WebSocket (primary) and QUIC (experimental) framing for encrypted envelopes."
+
+[dependencies]
+mx-types = { path = "../mx-types" }

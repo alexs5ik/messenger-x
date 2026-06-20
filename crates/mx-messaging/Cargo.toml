@@ -1,0 +1,9 @@
+[package]
+name = "mx-messaging"
+version = "0.1.0"
+edition = "2021"
+description = "Message delivery: envelope ingest, per-device fan-out, offline queues, delivery receipts."
+
+[dependencies]
+mx-types = { path = "../mx-types" }
+mx-storage = { path = "../mx-storage" }

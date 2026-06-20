@@ -1,0 +1,10 @@
+[package]
+name = "mx-groups"
+version = "0.1.0"
+edition = "2021"
+description = "Groups & communities: MLS group state, membership changes, roles."
+
+[dependencies]
+mx-types = { path = "../mx-types" }
+mx-crypto = { path = "../mx-crypto" }
+mx-storage = { path = "../mx-storage" }

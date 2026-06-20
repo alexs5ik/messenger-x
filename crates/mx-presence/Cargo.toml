@@ -1,0 +1,9 @@
+[package]
+name = "mx-presence"
+version = "0.1.0"
+edition = "2021"
+description = "Ephemeral presence: online status and typing indicators, backed by Redis."
+
+[dependencies]
+mx-types = { path = "../mx-types" }
+mx-storage = { path = "../mx-storage" }
