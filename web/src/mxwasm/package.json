@@ -1,0 +1,16 @@
+{
+  "name": "mx-crypto-wasm",
+  "type": "module",
+  "description": "WebAssembly bindings for mx-crypto: real PQXDH + Double Ratchet + AEAD in the browser.",
+  "version": "0.1.0",
+  "files": [
+    "mx_crypto_wasm_bg.wasm",
+    "mx_crypto_wasm.js",
+    "mx_crypto_wasm.d.ts"
+  ],
+  "main": "mx_crypto_wasm.js",
+  "types": "mx_crypto_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

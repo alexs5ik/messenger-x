@@ -2,7 +2,7 @@
 // gateway, and the crypto module.
 
 import { register, MxSocket, type Identity, type WireEnvelope } from "./api";
-import { encrypt, decrypt } from "./crypto";
+import { encrypt, decrypt, pqStatus } from "./crypto";
 
 interface Contact {
   userId: string;
@@ -109,6 +109,21 @@ function startApp(): void {
   // The server pushes messages over the WebSocket in real time (queued ones on connect,
   // live ones via its per-session hub), so the client just listens — no polling.
   socket.connect();
+
+  // Prove the post-quantum crypto core runs in-browser (wasm) and reflect it in the badge.
+  void pqStatus().then((s) => {
+    const badge = document.querySelector("#pqbadge") as HTMLElement | null;
+    if (!badge) return;
+    if (s.ok) {
+      badge.className = "badge ok";
+      badge.innerHTML = `<i class="ti ti-shield-check"></i> PQ ✓ ${s.kem ?? ""}`;
+      badge.title = "Hybrid PQXDH (X25519 + ML-KEM-768) + Double Ratchet verified in wasm";
+    } else {
+      badge.className = "badge";
+      badge.innerHTML = `<i class="ti ti-shield-x"></i> PQ ✗`;
+      badge.title = s.error ?? "self-test failed";
+    }
+  });
 }
 
 function renderApp(): void {
@@ -131,7 +146,7 @@ function renderApp(): void {
         <button id="newchat" class="newchat"><i class="ti ti-plus"></i> Новый чат</button>
         <div id="contacts" class="contacts"></div>
         <div class="side-ft">
-          <span class="badge ok"><i class="ti ti-lock"></i> E2E</span>
+          <span id="pqbadge" class="badge"><i class="ti ti-shield-lock"></i> PQ…</span>
           <span class="badge"><i class="ti ti-cpu"></i> on-device AI</span>
         </div>
       </aside>

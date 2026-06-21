@@ -1,0 +1,22 @@
+[package]
+name = "mx-crypto-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for mx-crypto: real PQXDH + Double Ratchet + AEAD in the browser."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mx-crypto = { path = "../mx-crypto" }
+mx-types = { path = "../mx-types" }
+wasm-bindgen = "0.2"
+# Force getrandom's JS backend so OsRng works on wasm32 (inert on native targets).
+getrandom = { version = "0.2", features = ["js"] }
+# Enable uuid's wasm randomness source (pulled in transitively via mx-types).
+uuid = { version = "1", features = ["js", "v4"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }

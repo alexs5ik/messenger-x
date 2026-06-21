@@ -6,6 +6,7 @@ resolver = "2"
 members = [
     "crates/mx-types",
     "crates/mx-crypto",
+    "crates/mx-crypto-wasm",
     "crates/mx-storage",
     "crates/mx-transport",
     "crates/mx-auth",
