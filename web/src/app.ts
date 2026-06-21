@@ -98,7 +98,27 @@ function sendReceipt(toUser: string, msgId: string): void {
   });
 }
 
+const THEMES = ["graphite", "ivory", "onyx"] as const;
+type Theme = (typeof THEMES)[number];
+const THEME_LABEL: Record<Theme, string> = { graphite: "Графит", ivory: "Айвори", onyx: "Оникс" };
+
+function applyTheme(t: Theme): void {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem("mx.theme", t);
+}
+function currentTheme(): Theme {
+  const t = localStorage.getItem("mx.theme") as Theme | null;
+  return t && THEMES.includes(t) ? t : "graphite";
+}
+function cycleTheme(): void {
+  const next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
+  applyTheme(next);
+  const btn = document.querySelector("#theme") as HTMLElement | null;
+  if (btn) btn.title = `Тема: ${THEME_LABEL[next]}`;
+}
+
 export function mount(): void {
+  applyTheme(currentTheme());
   // Self-heal: if stored data is from an older client (different format) or the device was
   // never provisioned with crypto secrets, wipe and start fresh so nothing silently breaks.
   const stale =
@@ -197,6 +217,7 @@ function renderApp(): void {
               <div id="status" class="status offline">оффлайн</div>
             </div>
           </div>
+          <button id="theme" class="icon" title="Тема: ${esc(THEME_LABEL[currentTheme()])}" aria-label="Сменить тему"><i class="ti ti-palette"></i></button>
           <button id="logout" class="icon" title="Выйти" aria-label="Выйти"><i class="ti ti-logout"></i></button>
         </div>
         <button id="copyid" class="myid" title="Скопировать ваш ID">
@@ -211,6 +232,7 @@ function renderApp(): void {
       </aside>
       <main id="main" class="main"></main>
     </div>`;
+  $("#theme").addEventListener("click", cycleTheme);
   $("#logout").addEventListener("click", () => {
     socket?.close();
     sessionStorage.clear();
