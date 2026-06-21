@@ -1,11 +1,16 @@
 // REST + WebSocket client for mx-server. URLs are relative so Vite's dev proxy forwards
 // them same-origin to the backend (see vite.config.ts).
 
+// How an account was created — selects the matching login input + server identifier field.
+export type RegisterMethod = "email" | "phone" | "name";
+
 export interface Identity {
   userId: string;
   deviceId: string;
   token: string;
   username: string;
+  method?: RegisterMethod; // how the account was created
+  contact?: string; // the email/phone entered (shown in the profile header)
 }
 
 // Wire shape of an envelope, matching mx_transport::wire_envelope (externally-tagged
@@ -23,20 +28,56 @@ function randomBytes(n: number): number[] {
   return Array.from(crypto.getRandomValues(new Uint8Array(n)));
 }
 
-// Register a new account + first device and obtain a session token.
-export async function register(username: string): Promise<Identity> {
+// Register a new account + first device and obtain a session token. The chosen identifier
+// (email / phone / name) is sent in its matching field; the server requires >=1 of them.
+export async function register(
+  value: string,
+  method: RegisterMethod = "name",
+): Promise<Identity> {
+  const body: Record<string, unknown> = {
+    // Placeholder identity key — the real client publishes its mx-crypto public key here.
+    identity_key: { algo: "x25519", bytes: randomBytes(32) },
+  };
+  if (method === "email") body.email = value;
+  else if (method === "phone") body.phone = value;
+  else body.username = value;
+
   const res = await fetch("/v1/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      username,
-      // Placeholder identity key — the real client publishes its mx-crypto public key here.
-      identity_key: { algo: "x25519", bytes: randomBytes(32) },
-    }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`register failed: ${res.status} ${await res.text()}`);
   const j = (await res.json()) as { user_id: string; device_id: string; token: string };
-  return { userId: j.user_id, deviceId: j.device_id, token: j.token, username };
+  // Display handle = whatever the user typed (email/phone/name) — that's what they recognize.
+  return {
+    userId: j.user_id,
+    deviceId: j.device_id,
+    token: j.token,
+    username: value,
+    method,
+    contact: method === "name" ? undefined : value,
+  };
+}
+
+// Admin REST helper: attaches the x-admin-token header and normalizes 401 / 204.
+export async function adminFetch<T>(
+  path: string,
+  adminToken: string,
+  init?: RequestInit,
+): Promise<T> {
+  const res = await fetch(path, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      "x-admin-token": adminToken,
+      ...(init?.headers ?? {}),
+    },
+  });
+  if (res.status === 401) throw new Error("unauthorized");
+  if (!res.ok) throw new Error(`admin ${path} failed: ${res.status} ${await res.text()}`);
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
 }
 
 // Publish a device's pre-key bundle (JSON string from the wasm crypto layer) so peers can

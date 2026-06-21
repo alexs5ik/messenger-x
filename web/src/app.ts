@@ -1,7 +1,15 @@
 // Messenger X web client — UI, local state, and wiring between the API, the WebSocket
 // gateway, and the crypto module.
 
-import { register, publishPrekeys, MxSocket, type Identity, type WireEnvelope } from "./api";
+import {
+  register,
+  publishPrekeys,
+  adminFetch,
+  MxSocket,
+  type Identity,
+  type RegisterMethod,
+  type WireEnvelope,
+} from "./api";
 import { encrypt, decrypt, provisionAccount, pqStatus } from "./crypto";
 
 interface Contact {
@@ -31,7 +39,8 @@ interface Group {
   id: string;
   name: string;
   kind: GroupKind;
-  members: string[]; // userIds, including self
+  members: string[]; // userIds, including self; members[0] is the creator by convention
+  creator?: string; // explicit creator userId (defaults to self on create)
 }
 
 // The STRING passed to encrypt() (and parsed after decrypt()) is JSON of this shape.
@@ -39,13 +48,13 @@ interface Group {
 // treated as a legacy plain-text message for backward compatibility.
 type AppMsg =
   | { t: "text"; text: string }
-  | { t: "ginvite"; g: string; name: string; kind: GroupKind; members: string[] }
+  | { t: "ginvite"; g: string; name: string; kind: GroupKind; members: string[]; creator?: string }
   | { t: "gtext"; g: string; text: string };
 
-const LS = { profile: "mx.profile", groups: "mx.groups" };
+const LS = { profile: "mx.profile", groups: "mx.groups", admin: "mx.admin" };
 
 // Bump when the shape of any stored data changes so old tabs auto-reset instead of breaking.
-const STORAGE_VERSION = "5";
+const STORAGE_VERSION = "6";
 
 const SS = {
   identity: "mx.identity",
@@ -134,6 +143,37 @@ function upsertGroup(g: Group): void {
   if (!findGroup(g.id)) {
     groups.push(g);
     saveGroups();
+  }
+}
+// Upsert that UPDATES an existing group's name/members/kind/creator (unlike upsertGroup,
+// which only inserts when absent). This is what lets roster re-broadcasts sync everyone.
+function upsertGroupSync(g: Group): void {
+  const ex = findGroup(g.id);
+  if (!ex) groups.push(g);
+  else {
+    ex.name = g.name;
+    ex.members = g.members;
+    ex.kind = g.kind;
+    if (g.creator) ex.creator = g.creator;
+  }
+  saveGroups();
+}
+// Admin = the explicit creator, or (for groups stored before this field existed) members[0].
+function isGroupAdmin(g: Group): boolean {
+  return (g.creator ?? g.members[0]) === identity!.userId;
+}
+// Re-send the current group definition as a ginvite to a set of recipients (sync roster/name).
+async function broadcastRoster(g: Group, to: string[]): Promise<void> {
+  for (const m of to) {
+    if (m === identity!.userId) continue;
+    await sendApp(m, {
+      t: "ginvite",
+      g: g.id,
+      name: g.name,
+      kind: g.kind,
+      members: g.members,
+      creator: g.creator,
+    });
   }
 }
 const KIND_ICON: Record<GroupKind, string> = {
@@ -267,19 +307,57 @@ function renderLogin(): void {
       <div class="login-card">
         <div class="brand"><i class="ti ti-shield-lock"></i> Messenger&nbsp;X</div>
         <p class="muted">Защищённый супер-мессенджер · демо-клиент</p>
-        <input id="uname" placeholder="Ваше имя" autocomplete="off" />
-        <button id="go" class="primary"><i class="ti ti-arrow-right"></i> Создать аккаунт</button>
+        <div class="login-methods" role="tablist">
+          <button class="login-method is-active" data-method="email"><i class="ti ti-mail"></i> Email</button>
+          <button class="login-method" data-method="phone"><i class="ti ti-phone"></i> Телефон</button>
+          <button class="login-method" data-method="name"><i class="ti ti-user"></i> Имя</button>
+        </div>
+        <input id="uname" type="email" placeholder="you@example.com" autocomplete="off" />
+        <div id="otpStep" class="login-otp" hidden>
+          <p class="hint" id="otpInfo"></p>
+          <input id="otpCode" inputmode="numeric" maxlength="6" placeholder="6-значный код" autocomplete="off" />
+        </div>
+        <button id="go" class="primary"><i class="ti ti-arrow-right"></i> Продолжить</button>
         <p class="hint" id="loginhint">Откройте вторую вкладку и создайте второго пользователя, чтобы переписываться.</p>
       </div>
     </div>`;
+
+  let method: RegisterMethod = "email";
+  let demoCode: string | null = null;
   const input = $("#uname") as HTMLInputElement;
+  const otpStep = $("#otpStep");
+  const otpInfo = $("#otpInfo");
+  const otpCode = $("#otpCode") as HTMLInputElement;
+  const go = $("#go") as HTMLButtonElement;
   input.focus();
-  const submit = async () => {
-    const name = input.value.trim();
-    if (!name) return;
+
+  // Method switch updates the input type/placeholder and resets the demo-OTP step.
+  root()
+    .querySelectorAll<HTMLElement>(".login-method")
+    .forEach((btn) =>
+      btn.addEventListener("click", () => {
+        root().querySelectorAll(".login-method").forEach((b) => b.classList.remove("is-active"));
+        btn.classList.add("is-active");
+        method = btn.dataset.method as RegisterMethod;
+        input.type = method === "email" ? "email" : method === "phone" ? "tel" : "text";
+        input.placeholder =
+          method === "email"
+            ? "you@example.com"
+            : method === "phone"
+              ? "+7 900 000-00-00"
+              : "Ваше имя";
+        input.value = "";
+        otpStep.hidden = true;
+        demoCode = null;
+        go.innerHTML = `<i class="ti ti-arrow-right"></i> Продолжить`;
+        input.focus();
+      }),
+    );
+
+  const doRegister = async () => {
     $("#loginhint").textContent = "Регистрация…";
     try {
-      identity = await register(name);
+      identity = await register(input.value.trim(), method);
       // Provision the device's PQXDH account and publish its pre-key bundle so peers can
       // start encrypted sessions against it.
       $("#loginhint").textContent = "Генерация ключей (PQXDH)…";
@@ -288,11 +366,38 @@ function renderLogin(): void {
       sessionStorage.setItem(SS.identity, JSON.stringify(identity));
       startApp();
     } catch (e) {
-      $("#loginhint").textContent = "Ошибка: запущен ли mx-server на :9990? " + (e as Error).message;
+      $("#loginhint").textContent =
+        "Ошибка: запущен ли mx-server на :9990? " + (e as Error).message;
     }
   };
-  $("#go").addEventListener("click", submit);
+
+  const submit = async () => {
+    const val = input.value.trim();
+    if (!val) return;
+    // Name registers directly; email/phone pass through a local DEMO 6-digit code first.
+    if (method === "name") return doRegister();
+    if (!demoCode) {
+      demoCode = String(Math.floor(100000 + Math.random() * 900000));
+      otpStep.hidden = false;
+      otpInfo.innerHTML =
+        `Демо-код: <b>${demoCode}</b> — обычно приходит на ${method === "email" ? "email" : "SMS"}. ` +
+        `Это локальная демонстрация (реальные сообщения не отправляются).`;
+      go.innerHTML = `<i class="ti ti-check"></i> Подтвердить и войти`;
+      otpCode.focus();
+      return;
+    }
+    if (otpCode.value.trim() !== demoCode) {
+      $("#loginhint").textContent = "Неверный код. Попробуйте ещё раз.";
+      return;
+    }
+    await doRegister();
+  };
+
+  go.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") submit();
+  });
+  otpCode.addEventListener("keydown", (e) => {
     if ((e as KeyboardEvent).key === "Enter") submit();
   });
 }
@@ -379,6 +484,12 @@ function renderApp(): void {
   renderContacts();
   renderMain();
   mountProfilePanel();
+  mountGroupAdmin();
+  // Restore a docked admin panel if the active chat is a group you administer.
+  if (active) {
+    const g = findGroup(active);
+    if (g && isGroupAdmin(g) && isGroupPinned()) openGroupAdmin(g.id);
+  }
 }
 
 // ---------- Logout (shared by rail button and profile footer) ----------
@@ -388,6 +499,8 @@ function doLogout(): void {
   // Reset device-bound profile & groups so the next account starts clean (keep theme).
   localStorage.removeItem(LS.profile);
   localStorage.removeItem(LS.groups);
+  localStorage.removeItem(LS.admin);
+  localStorage.removeItem(LS_GPIN);
   location.reload();
 }
 
@@ -437,6 +550,7 @@ function renderProfilePanel(): string {
               <span class="mx-id__sid">${sid}…</span> <i class="ti ti-copy"></i>
             </button>
           </div>
+          ${identity!.contact ? `<div class="mx-id__contact"><i class="ti ${identity!.method === "phone" ? "ti-phone" : "ti-mail"}"></i> ${esc(identity!.contact)}</div>` : ""}
           <button class="mx-status" type="button"><i class="ti ti-mood-smile"></i> Установить статус</button>
         </div>
       </div>
@@ -509,6 +623,7 @@ function renderProfilePanel(): string {
       <div class="mx-row mx-row--static"><i class="ti ti-bell mx-row__ic"></i><span class="mx-row__label">Уведомления</span><span class="mx-row__trail"><button class="mx-toggle" id="mxNotif" role="switch" aria-checked="true" aria-label="Уведомления"></button></span></div>
       <button class="mx-row" type="button"><i class="ti ti-language mx-row__ic"></i><span class="mx-row__label">Язык</span><span class="mx-row__trail"><span class="mx-row__val">Русский</span><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
       <button class="mx-row" type="button"><i class="ti ti-settings mx-row__ic"></i><span class="mx-row__label">Настройки</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button" id="mxAdminEntry"><i class="ti ti-shield-cog mx-row__ic"></i><span class="mx-row__label">Админ-консоль</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
     </div>
 
     <footer class="mx-foot">
@@ -649,12 +764,12 @@ function openCreateGroup(kind: GroupKind): void {
       body.querySelectorAll<HTMLInputElement>(".mx-pick input:checked"),
     ).map((i) => i.value);
     const members = Array.from(new Set([identity!.userId, ...picked]));
-    const g: Group = { id: crypto.randomUUID(), name, kind, members };
+    const g: Group = { id: crypto.randomUUID(), name, kind, members, creator: identity!.userId };
     upsertGroup(g);
     // Fan-out an invite to every member except self over their per-peer 1:1 channel.
     for (const m of members) {
       if (m === identity!.userId) continue;
-      await sendApp(m, { t: "ginvite", g: g.id, name, kind, members });
+      await sendApp(m, { t: "ginvite", g: g.id, name, kind, members, creator: g.creator });
     }
     closeProfile();
     renderContacts();
@@ -714,6 +829,8 @@ function wireProfilePanel(wrap: HTMLElement): void {
       if (railBtn) railBtn.title = `Тема: ${THEME_LABEL[t]}`;
     }),
   );
+
+  wrap.querySelector("#mxAdminEntry")?.addEventListener("click", openAdminConsole);
 
   wrap.querySelector("#mxLogout")?.addEventListener("click", doLogout);
 
@@ -798,6 +915,484 @@ function trapTab(wrap: HTMLElement, e: KeyboardEvent): void {
   }
 }
 
+// ---------- Super-admin console (full-screen overlay, gated by a secret key) ----------
+interface AdminOverview {
+  users: number;
+  devices: number;
+  queued_messages: number;
+  maintenance: boolean;
+}
+interface AdminUserRow {
+  user_id: string;
+  username: string;
+  email: string | null;
+  phone: string | null;
+  devices: number;
+}
+
+function getAdminToken(): string | null {
+  return localStorage.getItem(LS.admin);
+}
+
+// Open the console; prompt for the secret key once and remember it locally.
+async function openAdminConsole(): Promise<void> {
+  let token = getAdminToken();
+  if (!token) {
+    token = prompt("Секретный ключ администратора:")?.trim() || null;
+    if (!token) return;
+    localStorage.setItem(LS.admin, token);
+  }
+  closeProfile();
+  mountAdminOverlay();
+  await refreshAdmin();
+}
+
+// Build the body-level overlay shell (rebuilt fresh on each open).
+function mountAdminOverlay(): HTMLElement {
+  document.querySelectorAll(".mx-admin").forEach((el) => el.remove());
+  const ov = document.createElement("div");
+  ov.className = "mx-admin";
+  ov.innerHTML = `
+    <header class="mx-admin__hd">
+      <i class="ti ti-shield-cog mx-admin__lead"></i>
+      <div class="mx-admin__ttl">
+        <div class="mx-admin__title">Админ-консоль</div>
+        <div class="mx-admin__sub">Полный доступ · защищено секретным ключом</div>
+      </div>
+      <button class="mx-close" id="adClose" aria-label="Закрыть"><i class="ti ti-x"></i></button>
+    </header>
+    <div class="mx-admin__stats" id="adStats"></div>
+    <div class="mx-admin__sec">
+      <div class="mx-cap">Режим обслуживания</div>
+      <div class="mx-row mx-row--static"><i class="ti ti-tools mx-row__ic"></i><span class="mx-row__label">Заморозить отправку сообщений</span><span class="mx-row__trail"><button class="mx-toggle" id="adMaint" role="switch" aria-checked="false" aria-label="Режим обслуживания"></button></span></div>
+    </div>
+    <div class="mx-admin__sec">
+      <div class="mx-cap">Объявление всем пользователям</div>
+      <textarea class="mx-bcast" id="adBcast" placeholder="Текст объявления — придёт всем устройствам как системное сообщение…"></textarea>
+      <div class="mx-admin__bcast-actions">
+        <button class="mx-btn-primary" id="adSend"><i class="ti ti-speakerphone"></i> Отправить всем</button>
+      </div>
+    </div>
+    <div class="mx-admin__sec">
+      <div class="mx-cap">Пользователи</div>
+      <div class="mx-admin__tablewrap">
+        <table>
+          <thead><tr><th>Имя</th><th>Email</th><th>Телефон</th><th>Устройства</th><th></th></tr></thead>
+          <tbody id="adUsers"></tbody>
+        </table>
+      </div>
+    </div>
+    <p class="mx-admin__err" id="adErr" hidden></p>`;
+  document.body.appendChild(ov);
+  ov.querySelector("#adClose")?.addEventListener("click", closeAdminConsole);
+  ov.querySelector("#adSend")?.addEventListener("click", adminBroadcast);
+  ov.querySelector("#adMaint")?.addEventListener("click", adminToggleMaintenance);
+  if (!mxAdminEscHandler) {
+    mxAdminEscHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeAdminConsole();
+    };
+    document.addEventListener("keydown", mxAdminEscHandler);
+  }
+  return ov;
+}
+
+let mxAdminEscHandler: ((e: KeyboardEvent) => void) | null = null;
+
+function closeAdminConsole(): void {
+  document.querySelectorAll(".mx-admin").forEach((el) => el.remove());
+  if (mxAdminEscHandler) {
+    document.removeEventListener("keydown", mxAdminEscHandler);
+    mxAdminEscHandler = null;
+  }
+}
+
+function adminError(msg: string): void {
+  const el = document.querySelector("#adErr") as HTMLElement | null;
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+}
+
+// Fetch overview + users and paint them. 401 wipes the stored key and asks for re-entry.
+async function refreshAdmin(): Promise<void> {
+  const token = getAdminToken();
+  if (!token) return;
+  try {
+    const ov = await adminFetch<AdminOverview>("/v1/admin/overview", token);
+    const us = await adminFetch<AdminUserRow[]>("/v1/admin/users", token);
+    renderAdminData(ov, us);
+  } catch (e) {
+    if ((e as Error).message === "unauthorized") {
+      localStorage.removeItem(LS.admin);
+      adminError("Неверный ключ. Доступ запрещён. Откройте консоль снова, чтобы ввести ключ.");
+    } else {
+      adminError("Ошибка: " + (e as Error).message);
+    }
+  }
+}
+
+function renderAdminData(ov: AdminOverview, users: AdminUserRow[]): void {
+  const stats = document.querySelector("#adStats") as HTMLElement | null;
+  if (stats) {
+    stats.innerHTML = `
+      <div class="mx-stat"><div class="mx-stat__num">${ov.users}</div><div class="mx-stat__lbl">Пользователи</div></div>
+      <div class="mx-stat"><div class="mx-stat__num">${ov.devices}</div><div class="mx-stat__lbl">Устройства</div></div>
+      <div class="mx-stat"><div class="mx-stat__num">${ov.queued_messages}</div><div class="mx-stat__lbl">В очереди</div></div>
+      <div class="mx-stat"><div class="mx-stat__num">${ov.maintenance ? "Вкл" : "Выкл"}</div><div class="mx-stat__lbl">Обслуживание</div></div>`;
+  }
+  const maint = document.querySelector("#adMaint") as HTMLElement | null;
+  if (maint) maint.setAttribute("aria-checked", String(ov.maintenance));
+
+  const tbody = document.querySelector("#adUsers") as HTMLElement | null;
+  if (tbody) {
+    tbody.innerHTML = users.length
+      ? users
+          .map(
+            (u) => `<tr>
+              <td>${esc(u.username)}</td>
+              <td>${u.email ? esc(u.email) : "—"}</td>
+              <td>${u.phone ? esc(u.phone) : "—"}</td>
+              <td>${u.devices}</td>
+              <td><button class="mx-admin__del" data-del="${esc(u.user_id)}" title="Удалить" aria-label="Удалить пользователя"><i class="ti ti-trash"></i></button></td>
+            </tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="5" class="mx-admin__empty">Нет пользователей.</td></tr>`;
+    tbody.querySelectorAll<HTMLElement>("[data-del]").forEach((btn) =>
+      btn.addEventListener("click", () => adminDeleteUser(btn.dataset.del!)),
+    );
+  }
+  const err = document.querySelector("#adErr") as HTMLElement | null;
+  if (err) err.hidden = true;
+}
+
+async function adminBroadcast(): Promise<void> {
+  const token = getAdminToken();
+  if (!token) return;
+  const ta = document.querySelector("#adBcast") as HTMLTextAreaElement | null;
+  const text = ta?.value.trim();
+  if (!text) return;
+  try {
+    const r = await adminFetch<{ sent: number }>("/v1/admin/broadcast", token, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    if (ta) ta.value = "";
+    showAnnounce(`Объявление отправлено · доставок: ${r.sent}`);
+    await refreshAdmin();
+  } catch (e) {
+    adminError("Не удалось отправить: " + (e as Error).message);
+  }
+}
+
+async function adminDeleteUser(id: string): Promise<void> {
+  const token = getAdminToken();
+  if (!token) return;
+  if (!confirm("Удалить этого пользователя со всеми устройствами и сообщениями?")) return;
+  try {
+    await adminFetch("/v1/admin/users/" + id + "/delete", token, { method: "POST" });
+    await refreshAdmin();
+  } catch (e) {
+    adminError("Не удалось удалить: " + (e as Error).message);
+  }
+}
+
+async function adminToggleMaintenance(): Promise<void> {
+  const token = getAdminToken();
+  if (!token) return;
+  const btn = document.querySelector("#adMaint") as HTMLElement | null;
+  const current = btn?.getAttribute("aria-checked") === "true";
+  try {
+    const ov = await adminFetch<AdminOverview>("/v1/admin/maintenance", token, {
+      method: "POST",
+      body: JSON.stringify({ on: !current }),
+    });
+    // Re-render stats + toggle from the fresh overview (users list unchanged).
+    const us = await adminFetch<AdminUserRow[]>("/v1/admin/users", token);
+    renderAdminData(ov, us);
+  } catch (e) {
+    adminError("Не удалось переключить режим: " + (e as Error).message);
+  }
+}
+
+// ---------- System announcement banner (operator → user, one-way) ----------
+function showAnnounce(text: string): void {
+  const el = document.createElement("div");
+  el.className = "mx-announce";
+  el.innerHTML = `
+    <i class="ti ti-speakerphone mx-announce__ic"></i>
+    <div class="mx-announce__txt">${esc(text)}</div>
+    <button class="mx-announce__close" aria-label="Закрыть"><i class="ti ti-x"></i></button>`;
+  document.body.appendChild(el);
+  const dismiss = () => el.remove();
+  el.querySelector(".mx-announce__close")?.addEventListener("click", dismiss);
+  setTimeout(dismiss, 8000);
+}
+
+// ---------- Group / channel / community admin panel (left-slide, dockable) ----------
+const LS_GPIN = "mx.gpin";
+let mxGEscHandler: ((e: KeyboardEvent) => void) | null = null;
+
+function isGroupPinned(): boolean {
+  return localStorage.getItem(LS_GPIN) === "1";
+}
+function setGroupPinned(on: boolean): void {
+  localStorage.setItem(LS_GPIN, on ? "1" : "0");
+}
+
+// Shift the main app column right to make room for the docked panel (CSS does the rest).
+function applyGroupPinLayout(on: boolean): void {
+  document.querySelector(".app")?.classList.toggle("app--gpinned", on);
+}
+
+// (Re)build the panel as a body-level sibling so renderApp()/renderMain() can't destroy it.
+function mountGroupAdmin(): HTMLElement {
+  document.querySelectorAll(".mx-gwrap").forEach((el) => el.remove());
+  const wrap = document.createElement("div");
+  wrap.className = "mx-gwrap";
+  wrap.setAttribute("aria-hidden", "true");
+  document.body.appendChild(wrap);
+  return wrap;
+}
+
+function renderGroupAdmin(g: Group): string {
+  const creator = g.creator ?? g.members[0];
+  const memberRows = g.members
+    .map((uid) => {
+      const isCreator = uid === creator;
+      const isSelf = uid === identity!.userId;
+      const name = isSelf ? `${esc(displayName())} (вы)` : esc(senderLabel(uid));
+      const rm =
+        isCreator || isSelf
+          ? ""
+          : `<button class="mx-grow__rm icon" data-rm="${esc(uid)}" title="Удалить" aria-label="Удалить участника"><i class="ti ti-user-minus"></i></button>`;
+      return `<div class="mx-grow">
+        <div class="avatar sm">${esc((isSelf ? displayName() : senderLabel(uid)).slice(0, 2).toUpperCase())}</div>
+        <span class="mx-grow__name">${name}</span>
+        ${isCreator ? `<span class="mx-gadmin-badge">админ</span>` : ""}
+        ${rm}
+      </div>`;
+    })
+    .join("");
+
+  // Contacts not yet members — candidates to add.
+  const addable = contacts.filter((c) => !g.members.includes(c.userId));
+  const addList = addable.length
+    ? addable
+        .map(
+          (c) =>
+            `<label class="mx-pick"><input type="checkbox" value="${esc(c.userId)}" /><span>${esc(c.name)}</span></label>`,
+        )
+        .join("")
+    : `<p class="empty">Все контакты уже в составе.</p>`;
+
+  const pinned = isGroupPinned();
+  return `
+  <div class="mx-gbackdrop" data-gclose></div>
+  <aside class="mx-gpanel" role="dialog" aria-modal="${pinned ? "false" : "true"}" aria-label="Управление группой">
+    <header class="mx-ghead">
+      <div class="mx-ghead__bar">
+        <i class="ti ${KIND_ICON[g.kind]} mx-ghead__ic"></i>
+        <div class="mx-ghead__txt">
+          <div class="mx-ghead__title">Управление</div>
+          <div class="mx-ghead__sub">${esc(KIND_LABEL[g.kind])}</div>
+        </div>
+        <button class="mx-gpin" id="gPin" title="${pinned ? "Открепить" : "Зафиксировать"}" aria-pressed="${pinned}"><i class="ti ${pinned ? "ti-pinned" : "ti-pin"}"></i></button>
+        <button class="mx-close" data-gclose aria-label="Закрыть"><i class="ti ti-x"></i></button>
+      </div>
+    </header>
+
+    <div class="mx-gbody">
+      <div class="mx-cap">Название</div>
+      <div class="mx-edit-form" style="padding-top:0;">
+        <div class="mx-gname-row">
+          <input id="gName" class="mx-gname-input" maxlength="48" value="${esc(g.name)}" placeholder="${esc(KIND_LABEL[g.kind])}" />
+          <button class="mx-btn-primary mx-gname-save" id="gNameSave" type="button"><i class="ti ti-check"></i></button>
+        </div>
+      </div>
+
+      <div class="mx-cap">Участники · ${g.members.length}</div>
+      <div class="mx-gmembers">${memberRows}</div>
+
+      <div class="mx-cap">Добавить участника</div>
+      <div class="mx-picklist">${addList}</div>
+      ${addable.length ? `<div class="mx-gadd-actions"><button class="mx-btn-primary" id="gAdd" type="button"><i class="ti ti-user-plus"></i> Добавить выбранных</button></div>` : ""}
+
+      <div class="mx-cap">Приглашение</div>
+      <button class="mx-row" type="button" id="gCopy"><i class="ti ti-link mx-row__ic"></i><span class="mx-row__label">Скопировать ID (приглашение)</span><span class="mx-row__trail"><i class="ti ti-copy mx-row__chev"></i></span></button>
+
+      <div class="mx-cap">Опасная зона</div>
+      <button class="mx-row" type="button" id="gLeave"><i class="ti ti-door-exit mx-row__ic"></i><span class="mx-row__label">Покинуть ${esc(KIND_LABEL[g.kind].toLowerCase())}</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row mx-grow--danger" type="button" id="gDelete"><i class="ti ti-trash mx-row__ic"></i><span class="mx-row__label">Удалить ${esc(KIND_LABEL[g.kind].toLowerCase())}</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+    </div>
+  </aside>`;
+}
+
+// Re-render the panel body in place after a mutation (fresh group state, keep it open).
+function refreshGroupAdmin(wrap: HTMLElement, groupId: string): void {
+  const g = findGroup(groupId);
+  if (!g || !isGroupAdmin(g)) {
+    closeGroupAdmin();
+    return;
+  }
+  const open = wrap.classList.contains("open");
+  const pinned = wrap.classList.contains("pinned");
+  wrap.innerHTML = renderGroupAdmin(g);
+  wireGroupAdmin(wrap, groupId);
+  if (open) {
+    wrap.classList.add("open");
+    wrap.setAttribute("aria-hidden", "false");
+  }
+  if (pinned) wrap.classList.add("pinned");
+}
+
+function wireGroupAdmin(wrap: HTMLElement, groupId: string): void {
+  wrap.querySelectorAll("[data-gclose]").forEach((el) =>
+    el.addEventListener("click", () => {
+      // Backdrop click only closes when not pinned; the explicit X always closes.
+      if ((el as HTMLElement).classList.contains("mx-gbackdrop") && isGroupPinned()) return;
+      closeGroupAdmin();
+    }),
+  );
+
+  // Pin / unpin (dock the panel beside the chat).
+  wrap.querySelector("#gPin")?.addEventListener("click", () => {
+    const now = !isGroupPinned();
+    setGroupPinned(now);
+    wrap.classList.toggle("pinned", now);
+    applyGroupPinLayout(now);
+    refreshGroupAdmin(wrap, groupId);
+  });
+
+  // Edit name → save locally + re-broadcast roster so everyone syncs.
+  wrap.querySelector("#gNameSave")?.addEventListener("click", async () => {
+    const g = findGroup(groupId);
+    if (!g) return;
+    const next = (wrap.querySelector("#gName") as HTMLInputElement).value.trim();
+    if (!next || next === g.name) return;
+    g.name = next;
+    saveGroups();
+    renderContacts();
+    renderMain();
+    await broadcastRoster(g, g.members);
+    refreshGroupAdmin(wrap, groupId);
+  });
+
+  // Remove a member → splice locally + re-broadcast to the remaining roster.
+  wrap.querySelectorAll<HTMLElement>("[data-rm]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      const g = findGroup(groupId);
+      if (!g) return;
+      const uid = btn.dataset.rm!;
+      g.members = g.members.filter((m) => m !== uid);
+      saveGroups();
+      renderContacts();
+      renderMain();
+      await broadcastRoster(g, g.members);
+      refreshGroupAdmin(wrap, groupId);
+    }),
+  );
+
+  // Add selected contacts → send a fresh ginvite to each new member AND sync existing ones.
+  wrap.querySelector("#gAdd")?.addEventListener("click", async () => {
+    const g = findGroup(groupId);
+    if (!g) return;
+    const picked = Array.from(
+      wrap.querySelectorAll<HTMLInputElement>(".mx-picklist input:checked"),
+    ).map((i) => i.value);
+    if (!picked.length) return;
+    const existing = g.members.slice();
+    g.members = Array.from(new Set([...g.members, ...picked]));
+    saveGroups();
+    renderContacts();
+    renderMain();
+    // New members get the invite; existing members get the updated roster.
+    await broadcastRoster(g, picked);
+    await broadcastRoster(g, existing);
+    refreshGroupAdmin(wrap, groupId);
+  });
+
+  // Copy group id as an invite.
+  wrap.querySelector("#gCopy")?.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(groupId);
+    const label = wrap.querySelector("#gCopy .mx-row__label");
+    if (label) {
+      const prev = label.textContent;
+      label.textContent = "Скопировано!";
+      setTimeout(() => (label.textContent = prev), 1200);
+    }
+  });
+
+  // Leave → remove self, sync the rest, then tear the group down locally.
+  wrap.querySelector("#gLeave")?.addEventListener("click", async () => {
+    const g = findGroup(groupId);
+    if (!g) return;
+    if (!confirm(`Покинуть «${g.name}»?`)) return;
+    const rest = g.members.filter((m) => m !== identity!.userId);
+    g.members = rest;
+    await broadcastRoster(g, rest);
+    teardownGroup(groupId);
+  });
+
+  // Delete (local only — no server-side group state).
+  wrap.querySelector("#gDelete")?.addEventListener("click", () => {
+    const g = findGroup(groupId);
+    if (!g) return;
+    if (!confirm(`Удалить «${g.name}»? Это действие удалит ${KIND_LABEL[g.kind].toLowerCase()} только у вас.`))
+      return;
+    teardownGroup(groupId);
+  });
+}
+
+// Remove a group locally and close the panel/chat.
+function teardownGroup(groupId: string): void {
+  groups = groups.filter((g) => g.id !== groupId);
+  saveGroups();
+  if (active === groupId) active = null;
+  closeGroupAdmin(true);
+  renderContacts();
+  renderMain();
+}
+
+function openGroupAdmin(groupId: string): void {
+  const g = findGroup(groupId);
+  if (!g || !isGroupAdmin(g)) return; // never for 1:1 or non-admins
+  const wrap = (document.querySelector(".mx-gwrap") as HTMLElement) ?? mountGroupAdmin();
+  wrap.innerHTML = renderGroupAdmin(g);
+  wireGroupAdmin(wrap, groupId);
+  wrap.classList.add("open");
+  wrap.setAttribute("aria-hidden", "false");
+  if (isGroupPinned()) {
+    wrap.classList.add("pinned");
+    applyGroupPinLayout(true);
+  }
+  if (!mxGEscHandler) {
+    mxGEscHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeGroupAdmin();
+    };
+    document.addEventListener("keydown", mxGEscHandler);
+  }
+}
+
+// Hide the panel. Keeps the pinned flag (reopening restores the docked state) unless
+// `clearPin` is set (used when the group is deleted/left).
+function closeGroupAdmin(clearPin = false): void {
+  const wrap = document.querySelector(".mx-gwrap") as HTMLElement | null;
+  if (wrap) {
+    wrap.classList.remove("open");
+    wrap.setAttribute("aria-hidden", "true");
+    if (clearPin) wrap.classList.remove("pinned");
+  }
+  if (clearPin) {
+    setGroupPinned(false);
+    applyGroupPinLayout(false);
+  }
+  if (mxGEscHandler) {
+    document.removeEventListener("keydown", mxGEscHandler);
+    mxGEscHandler = null;
+  }
+}
+
 function renderContacts(): void {
   const box = $("#contacts");
   if (!contacts.length && !groups.length) {
@@ -858,6 +1453,7 @@ function renderMain(): void {
         <div class="chat-name">${esc(grp.name)}</div>
         <div class="chat-sub"><i class="ti ti-lock"></i> ${KIND_LABEL[grp.kind]} · ${grp.members.length} участн. · E2E pairwise</div>
       </div>
+      ${isGroupAdmin(grp) ? `<button id="grpManage" class="icon" title="Управление" aria-label="Управление группой"><i class="ti ti-settings"></i></button>` : ""}
     </div>
     <div id="feed" class="feed"></div>
     <div class="inbar">
@@ -872,6 +1468,9 @@ function renderMain(): void {
     ginput.addEventListener("keydown", (e) => {
       if ((e as KeyboardEvent).key === "Enter") gsend();
     });
+    $("#grpManage")?.addEventListener("click", () => openGroupAdmin(grp.id));
+    // If the panel is docked, keep the layout shifted after a re-render.
+    if (isGroupPinned() && isGroupAdmin(grp)) applyGroupPinLayout(true);
     return;
   }
   const contact = contacts.find((c) => c.userId === active)!;
@@ -933,6 +1532,15 @@ function selectPeer(id: string): void {
   unread.delete(id);
   renderContacts();
   renderMain();
+  // Keep the group admin panel in sync with the active chat.
+  const g = findGroup(id);
+  if (g && isGroupAdmin(g) && isGroupPinned()) {
+    openGroupAdmin(g.id); // re-dock for the newly selected administered group
+  } else {
+    // Switched to a 1:1 (or a group you don't admin): hide the panel + un-shift layout.
+    closeGroupAdmin();
+    applyGroupPinLayout(false);
+  }
 }
 
 function newChat(): void {
@@ -989,14 +1597,17 @@ async function sendMessage(input: HTMLInputElement): Promise<void> {
 async function onIncoming(env: WireEnvelope): Promise<void> {
   if (!identity) return;
 
-  // Control frames carry delivery receipts (cleartext), not chat content.
+  // Control frames carry cleartext signals (delivery receipts, operator announcements),
+  // not chat content.
   if (env.kind === "control") {
     try {
       const ctrl = JSON.parse(new TextDecoder().decode(Uint8Array.from(env.ciphertext))) as {
         t?: string;
         id?: string;
+        text?: string;
       };
       if (ctrl.t === "receipt" && ctrl.id) markStatus(ctrl.id, "delivered");
+      else if (ctrl.t === "announce" && ctrl.text) showAnnounce(ctrl.text);
     } catch {
       /* ignore malformed control frame */
     }
@@ -1016,7 +1627,15 @@ async function onIncoming(env: WireEnvelope): Promise<void> {
     }
 
     if (app && app.t === "ginvite") {
-      upsertGroup({ id: app.g, name: app.name, kind: app.kind, members: app.members });
+      // Sync the full group definition (name/roster/creator) so re-broadcasts propagate edits.
+      upsertGroupSync({
+        id: app.g,
+        name: app.name,
+        kind: app.kind,
+        members: app.members,
+        creator: app.creator,
+      });
+      if (app.g === active) renderMain(); // reflect roster/name changes if this chat is open
       renderContacts();
       // Groups don't use delivery receipts.
       return;

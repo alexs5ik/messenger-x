@@ -56,6 +56,18 @@ impl InMemoryUserStore {
             st.devices.entry(d.user_id).or_default().push(d);
         }
     }
+
+    /// Remove a user and all its devices; returns the removed device ids.
+    pub async fn delete_user(&self, id: UserId) -> Vec<DeviceId> {
+        let mut st = self.inner.write().await;
+        st.users.remove(&id);
+        st.devices
+            .remove(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| d.id)
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -68,12 +80,25 @@ impl UserStore for InMemoryUserStore {
                 user.id
             )));
         }
-        // Enforce username uniqueness, mirroring a real DB unique constraint.
-        if st.users.values().any(|u| u.username == user.username) {
-            return Err(Error::InvalidInput(format!(
-                "username already taken: {}",
-                user.username
-            )));
+        // Enforce uniqueness across username AND email AND phone, mirroring DB unique
+        // constraints.
+        for existing in st.users.values() {
+            if existing.username == user.username {
+                return Err(Error::InvalidInput(format!(
+                    "username already taken: {}",
+                    user.username
+                )));
+            }
+            if let (Some(a), Some(b)) = (&existing.email, &user.email) {
+                if a == b {
+                    return Err(Error::InvalidInput(format!("email already registered: {b}")));
+                }
+            }
+            if let (Some(a), Some(b)) = (&existing.phone, &user.phone) {
+                if a == b {
+                    return Err(Error::InvalidInput(format!("phone already registered: {b}")));
+                }
+            }
         }
         st.users.insert(user.id, user);
         Ok(())
@@ -144,6 +169,11 @@ impl InMemoryPreKeyStore {
         let mut map = self.inner.lock().await;
         *map = bundles.into_iter().map(|b| (b.device_id, b)).collect();
     }
+
+    /// Remove a device's prekey bundle.
+    pub async fn remove_device(&self, device: DeviceId) {
+        self.inner.lock().await.remove(&device);
+    }
 }
 
 #[async_trait]
@@ -189,6 +219,16 @@ impl InMemoryMessageQueue {
     /// Create an empty queue store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Total queued envelopes across all devices (non-destructive; for admin overview).
+    pub async fn total_len(&self) -> usize {
+        self.inner.lock().await.values().map(|q| q.len()).sum()
+    }
+
+    /// Drop a device's entire queue (used when deleting a user's devices).
+    pub async fn purge_device(&self, device: DeviceId) {
+        self.inner.lock().await.remove(&device);
     }
 }
 

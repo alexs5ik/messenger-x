@@ -21,6 +21,12 @@ pub struct User {
     /// Human-facing handle (e.g. `@alice`). Unique by convention; uniqueness is enforced
     /// by the caller / a real DB constraint, not by the in-memory dev store.
     pub username: String,
+    /// Optional email identifier (unique across accounts when present).
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Optional phone identifier (unique across accounts when present).
+    #[serde(default)]
+    pub phone: Option<String>,
 }
 
 impl User {
@@ -29,6 +35,8 @@ impl User {
         Self {
             id: UserId::new(),
             username: username.into(),
+            email: None,
+            phone: None,
         }
     }
 
@@ -37,7 +45,16 @@ impl User {
         Self {
             id,
             username: username.into(),
+            email: None,
+            phone: None,
         }
+    }
+
+    /// Attach optional contact identifiers (builder-style).
+    pub fn with_contacts(mut self, email: Option<String>, phone: Option<String>) -> Self {
+        self.email = email;
+        self.phone = phone;
+        self
     }
 }
 

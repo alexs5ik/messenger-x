@@ -118,11 +118,38 @@ impl AuthService {
     /// Username uniqueness is enforced by the underlying [`UserStore`]; a clash surfaces as
     /// [`mx_types::Error::InvalidInput`].
     pub async fn register_user(&self, username: impl Into<String>) -> Result<UserId> {
-        let username = username.into();
-        if username.trim().is_empty() {
-            return Err(Error::InvalidInput("username must not be empty".into()));
-        }
-        let user = User::new(username);
+        self.register_account(Some(username.into()), None, None).await
+    }
+
+    /// Register a new account with any combination of username/email/phone (≥1 required).
+    ///
+    /// Identifiers are trimmed (email lower-cased) and blank ones discarded. At least one
+    /// identifier must remain or [`mx_types::Error::InvalidInput`] is returned. When only an
+    /// email/phone is supplied it doubles as the display username. Uniqueness across all
+    /// three identifiers is enforced by the underlying [`UserStore`].
+    pub async fn register_account(
+        &self,
+        username: Option<String>,
+        email: Option<String>,
+        phone: Option<String>,
+    ) -> Result<UserId> {
+        let username = username.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let email = email
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+        let phone = phone.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+        // Need at least one identifier. Derive a display username if only email/phone given.
+        let username = match (&username, &email, &phone) {
+            (Some(u), _, _) => u.clone(),
+            (None, Some(e), _) => e.clone(),
+            (None, None, Some(p)) => p.clone(),
+            (None, None, None) => {
+                return Err(Error::InvalidInput("at least one identifier required".into()));
+            }
+        };
+
+        let user = User::new(username).with_contacts(email, phone);
         let id = user.id;
         self.users.create_user(user).await?;
         Ok(id)

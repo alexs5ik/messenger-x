@@ -27,9 +27,20 @@
 //! | `POST /v1/messages`          | Ingest an [`Envelope`] → `202 Accepted`.           |
 //! | `GET  /v1/messages/:device`  | Drain a device's queued envelopes (JSON array).    |
 //! | `GET  /v1/ws`                | WebSocket gateway (auth → send/receive loop).      |
+//!
+//! ## Admin API (header `x-admin-token` == env `MX_ADMIN_TOKEN`, default `mx-dev-admin`)
+//!
+//! | Method & path                       | Purpose                                     |
+//! |-------------------------------------|---------------------------------------------|
+//! | `GET  /v1/admin/overview`           | Counts (users/devices/queued) + maintenance.|
+//! | `GET  /v1/admin/users`              | All accounts with identifiers + device count.|
+//! | `POST /v1/admin/broadcast`          | Announcement Control envelope to all devices.|
+//! | `POST /v1/admin/users/:id/delete`   | Remove a user + devices/prekeys/queue.       |
+//! | `POST /v1/admin/maintenance`        | Toggle the global ingest kill-switch.        |
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,7 +49,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -60,7 +71,9 @@ use mx_storage::{
     UserStore,
 };
 use mx_transport::{ClientMessage, ServerMessage};
-use mx_types::{DeviceId, Envelope, Error, PreKeyBundle, PublicKey, UserId};
+use mx_types::{
+    Ciphertext, DeviceId, Envelope, Error, MessageKind, PreKeyBundle, PublicKey, Recipient, UserId,
+};
 
 /// Concrete messaging service type used by the in-memory deployment.
 ///
@@ -129,6 +142,12 @@ struct AppState {
     users: Arc<InMemoryUserStore>,
     prekeys: Arc<InMemoryPreKeyStore>,
     groups: Arc<InMemoryGroupStore>,
+    /// Message queue handle retained for admin overview (count) + user deletion (purge).
+    queue: Arc<InMemoryMessageQueue>,
+    /// Secret guarding all `/v1/admin/*` routes (header `x-admin-token`).
+    admin_token: Arc<String>,
+    /// Global kill-switch: when true, message ingest is rejected.
+    maintenance: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -149,11 +168,12 @@ impl AppState {
 
         // `MessagingService` owns its stores by value; the `Arc` blanket impls make the
         // shared handles satisfy the store traits, so it routes over the *same* state. We
-        // clone the handles (cheap Arc bumps) so AppState can also reach them for snapshots.
+        // clone the handles (cheap Arc bumps) so AppState can also reach them for snapshots
+        // and for admin queue inspection / purge.
         let messaging = Arc::new(MessagingService::new(
             users.clone(),
             groups.clone(),
-            queue,
+            queue.clone(),
         ));
 
         Self {
@@ -165,6 +185,20 @@ impl AppState {
             users,
             prekeys,
             groups,
+            queue,
+            admin_token: Arc::new(
+                std::env::var("MX_ADMIN_TOKEN").unwrap_or_else(|_| "mx-dev-admin".to_string()),
+            ),
+            maintenance: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Remove a user and every trace of it: account, devices, prekeys, and queued messages.
+    async fn delete_user(&self, id: UserId) {
+        let removed = self.users.delete_user(id).await;
+        for d in removed {
+            self.prekeys.remove_device(d).await;
+            self.queue.purge_device(d).await;
         }
     }
 
@@ -261,11 +295,20 @@ impl IntoResponse for ApiError {
 // Request / response DTOs
 // ===========================================================================
 
-/// `POST /v1/register` request: a username plus the new device's identity public key.
+/// `POST /v1/register` request: at least one identifier (username/email/phone) plus the new
+/// device's identity public key. The server requires ≥1 identifier and enforces uniqueness
+/// across all three.
 #[derive(Debug, Deserialize)]
 struct RegisterRequest {
     /// Human-facing handle for the new account.
-    username: String,
+    #[serde(default)]
+    username: Option<String>,
+    /// Optional email identifier.
+    #[serde(default)]
+    email: Option<String>,
+    /// Optional phone identifier.
+    #[serde(default)]
+    phone: Option<String>,
     /// Long-term identity public key for the account's first device.
     identity_key: PublicKey,
 }
@@ -318,7 +361,10 @@ async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisterResponse>), ApiError> {
-    let user_id = state.auth.register_user(req.username).await?;
+    let user_id = state
+        .auth
+        .register_account(req.username, req.email, req.phone)
+        .await?;
     let device_id = state
         .auth
         .register_device(user_id, req.identity_key)
@@ -368,13 +414,32 @@ async fn fetch_user_prekey(
     Ok(Json(bundle))
 }
 
-/// Ingest an opaque envelope for fan-out. Returns `202 Accepted` once queued.
+/// A `503 Service Unavailable` response emitted while maintenance mode is engaged. There is
+/// no `503` variant in [`mx_types::Error`], so this is built directly rather than via
+/// [`ApiError`].
+fn maintenance_rejection() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "error": "maintenance mode" })),
+    )
+        .into_response()
+}
+
+/// Ingest an opaque envelope for fan-out. Returns `202 Accepted` once queued, or
+/// `503 Service Unavailable` while the maintenance kill-switch is engaged.
 async fn ingest_message(
     State(state): State<AppState>,
     Json(WireEnvelope(envelope)): Json<WireEnvelope>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<StatusCode, Response> {
+    if state.maintenance.load(Ordering::Relaxed) {
+        return Err(maintenance_rejection());
+    }
     let to = envelope.to.clone();
-    state.messaging.ingest(envelope).await?;
+    state
+        .messaging
+        .ingest(envelope)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
     state.notify_recipients(&to).await;
     Ok(StatusCode::ACCEPTED)
 }
@@ -386,6 +451,160 @@ async fn pull_messages(
 ) -> Result<Json<Vec<WireEnvelope>>, ApiError> {
     let pending = state.messaging.pull(device).await?;
     Ok(Json(pending.into_iter().map(WireEnvelope).collect()))
+}
+
+// ===========================================================================
+// Admin API (gated by `x-admin-token` == env `MX_ADMIN_TOKEN`)
+// ===========================================================================
+
+/// Returns `Ok(())` if the request carries the correct admin token, else `401 Unauthorized`.
+fn admin_guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let ok = headers
+        .get("x-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|t| t == state.admin_token.as_str())
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err(ApiError(Error::Unauthorized))
+    }
+}
+
+/// Snapshot counts for the admin dashboard.
+#[derive(Serialize)]
+struct AdminOverview {
+    users: usize,
+    devices: usize,
+    queued_messages: usize,
+    maintenance: bool,
+}
+
+/// One row of the admin user table.
+#[derive(Serialize)]
+struct AdminUserRow {
+    user_id: UserId,
+    username: String,
+    email: Option<String>,
+    phone: Option<String>,
+    devices: usize,
+}
+
+#[derive(Deserialize)]
+struct BroadcastRequest {
+    text: String,
+}
+
+#[derive(Serialize)]
+struct BroadcastResponse {
+    sent: usize,
+}
+
+#[derive(Deserialize)]
+struct MaintenanceRequest {
+    on: bool,
+}
+
+/// Build the current overview snapshot (shared by `GET /overview` and the maintenance toggle).
+async fn build_overview(state: &AppState) -> AdminOverview {
+    let (users, devices) = state.users.export().await;
+    AdminOverview {
+        users: users.len(),
+        devices: devices.len(),
+        queued_messages: state.queue.total_len().await,
+        maintenance: state.maintenance.load(Ordering::Relaxed),
+    }
+}
+
+/// `GET /v1/admin/overview` — counts + maintenance state.
+async fn admin_overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminOverview>, ApiError> {
+    admin_guard(&state, &headers)?;
+    Ok(Json(build_overview(&state).await))
+}
+
+/// `GET /v1/admin/users` — every account with its identifiers and device count.
+async fn admin_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AdminUserRow>>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let (users, devices) = state.users.export().await;
+    let rows = users
+        .into_iter()
+        .map(|u| {
+            let count = devices.iter().filter(|d| d.user_id == u.id).count();
+            AdminUserRow {
+                user_id: u.id,
+                username: u.username,
+                email: u.email,
+                phone: u.phone,
+                devices: count,
+            }
+        })
+        .collect();
+    Ok(Json(rows))
+}
+
+/// `POST /v1/admin/broadcast` — enqueue a cleartext announcement Control envelope to every
+/// device of every user, waking any live sessions. Returns the number of device deliveries.
+async fn admin_broadcast(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<BroadcastRequest>,
+) -> Result<Json<BroadcastResponse>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let text = req.text.trim();
+    if text.is_empty() {
+        return Err(ApiError(Error::InvalidInput(
+            "broadcast text must not be empty".into(),
+        )));
+    }
+    // Cleartext announce payload (NOT E2E — this is an operator system message). The client
+    // routes it through the existing `control` branch by `MessageKind::Control`.
+    let body = serde_json::json!({ "t": "announce", "text": text }).to_string();
+    let (users, _) = state.users.export().await;
+    let mut sent = 0usize;
+    for u in users {
+        let env = Envelope::new(
+            DeviceId::new(), // synthetic server sender
+            Recipient::Direct(u.id),
+            MessageKind::Control,
+            Ciphertext(body.clone().into_bytes()),
+            now_ms(),
+        );
+        let to = env.to.clone();
+        // ingest fans out to every device of the user and enqueues; then wake live sessions.
+        if let Ok(n) = state.messaging.ingest(env).await {
+            sent += n;
+            state.notify_recipients(&to).await;
+        }
+    }
+    Ok(Json(BroadcastResponse { sent }))
+}
+
+/// `POST /v1/admin/users/:id/delete` — remove a user + its devices, prekeys, and queue.
+async fn admin_delete_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<UserId>,
+) -> Result<StatusCode, ApiError> {
+    admin_guard(&state, &headers)?;
+    state.delete_user(id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/admin/maintenance` — toggle the global ingest kill-switch; returns fresh overview.
+async fn admin_maintenance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<MaintenanceRequest>,
+) -> Result<Json<AdminOverview>, ApiError> {
+    admin_guard(&state, &headers)?;
+    state.maintenance.store(req.on, Ordering::Relaxed);
+    Ok(Json(build_overview(&state).await))
 }
 
 // ===========================================================================
@@ -480,6 +699,15 @@ async fn ws_session(state: AppState, socket: WebSocket) {
                     ClientMessage::Hello { .. } => heartbeat(&state, device).await,
 
                     ClientMessage::Send(envelope) => {
+                        // Maintenance kill-switch: refuse ingest globally while engaged.
+                        if state.maintenance.load(Ordering::Relaxed) {
+                            if !send_frame(&mut sender, ServerMessage::Error {
+                                message: "maintenance mode: messaging temporarily disabled".into(),
+                            }).await {
+                                break;
+                            }
+                            continue;
+                        }
                         let id = envelope.id;
                         let to = envelope.to.clone();
                         match state.messaging.ingest(envelope).await {
@@ -581,6 +809,11 @@ fn app(state: AppState) -> Router {
         .route("/v1/users/:user/prekey", get(fetch_user_prekey))
         .route("/v1/messages", post(ingest_message))
         .route("/v1/messages/:device", get(pull_messages))
+        .route("/v1/admin/overview", get(admin_overview))
+        .route("/v1/admin/users", get(admin_users))
+        .route("/v1/admin/broadcast", post(admin_broadcast))
+        .route("/v1/admin/users/:id/delete", post(admin_delete_user))
+        .route("/v1/admin/maintenance", post(admin_maintenance))
         .route("/v1/ws", get(ws_handler))
         .with_state(state)
 }
@@ -786,6 +1019,170 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/v1/prekeys/{}", DeviceId::new()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Register a user and return the parsed response.
+    async fn register_user(state: &AppState, username: &str) -> RegisterResponse {
+        let reg_body = serde_json::to_vec(&serde_json::json!({
+            "username": username,
+            "identity_key": test_pubkey(),
+        }))
+        .unwrap();
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(reg_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        json_body(resp).await
+    }
+
+    #[tokio::test]
+    async fn admin_overview_requires_token() {
+        let state = test_state();
+        // No token => 401.
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/admin/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct token (default `mx-dev-admin`) => 200.
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/admin/overview")
+                    .header("x-admin-token", "mx-dev-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_broadcast_enqueues_to_user_device() {
+        let state = test_state();
+        let reg = register_user(&state, "alice").await;
+
+        let body = serde_json::to_vec(&serde_json::json!({ "text": "hello all" })).unwrap();
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/broadcast")
+                    .header("content-type", "application/json")
+                    .header("x-admin-token", "mx-dev-admin")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let out: serde_json::Value = json_body(resp).await;
+        assert_eq!(out["sent"], 1, "one device should receive the announcement");
+
+        // The announcement lands in the device queue as a Control envelope.
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/messages/{}", reg.device_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let pulled: Vec<WireEnvelope> = json_body(resp).await;
+        assert_eq!(pulled.len(), 1);
+        let txt = String::from_utf8(pulled[0].0.ciphertext.0.clone()).unwrap();
+        assert!(txt.contains("\"announce\"") && txt.contains("hello all"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_blocks_http_ingest_with_503() {
+        let state = test_state();
+        let reg = register_user(&state, "bob").await;
+
+        // Engage maintenance.
+        let body = serde_json::to_vec(&serde_json::json!({ "on": true })).unwrap();
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/maintenance")
+                    .header("content-type", "application/json")
+                    .header("x-admin-token", "mx-dev-admin")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Ingest is now rejected with 503.
+        let envelope = Envelope::new(
+            DeviceId::new(),
+            Recipient::Direct(reg.user_id),
+            MessageKind::Chat,
+            Ciphertext(vec![1, 2, 3]),
+            0,
+        );
+        let env_body = serde_json::to_vec(&WireEnvelope(envelope)).unwrap();
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(env_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn admin_delete_user_removes_account() {
+        let state = test_state();
+        let reg = register_user(&state, "carol").await;
+
+        let resp = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/admin/users/{}/delete", reg.user_id))
+                    .header("x-admin-token", "mx-dev-admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The user is gone: prekey directory lookup now 404s.
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/users/{}/prekey", reg.user_id))
                     .body(Body::empty())
                     .unwrap(),
             )
