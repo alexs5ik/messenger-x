@@ -190,6 +190,95 @@ pub struct PreKeySecrets {
     pub kem: KemKeyPair,
 }
 
+impl PreKeySecrets {
+    /// Serialize all secret key material to a portable byte blob so a device can persist it
+    /// (e.g. in browser storage) and complete responder handshakes after a restart/reload.
+    /// Layout: signing(32) | identity_dh(32) | signed_prekey(32) | one_time_flag(1)[+32] |
+    /// decap_len(u32 LE) | decap | encap_len(u32 LE) | encap.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.identity.signing.to_bytes());
+        out.extend_from_slice(&self.identity.dh_secret.to_bytes());
+        out.extend_from_slice(&self.signed_prekey.secret.to_bytes());
+        match &self.one_time_prekey {
+            Some(o) => {
+                out.push(1);
+                out.extend_from_slice(&o.secret.to_bytes());
+            }
+            None => out.push(0),
+        }
+        let decap = self.kem.decap.as_bytes();
+        let encap = self.kem.encap.as_bytes();
+        let decap: &[u8] = &decap;
+        let encap: &[u8] = &encap;
+        out.extend_from_slice(&(decap.len() as u32).to_le_bytes());
+        out.extend_from_slice(decap);
+        out.extend_from_slice(&(encap.len() as u32).to_le_bytes());
+        out.extend_from_slice(encap);
+        out
+    }
+
+    /// Reconstruct [`PreKeySecrets`] from [`to_bytes`](Self::to_bytes). The signed pre-key
+    /// signature is recomputed from the restored identity (it is not needed for the responder
+    /// role, but keeps the value internally consistent).
+    pub fn from_bytes(data: &[u8]) -> mx_types::Result<Self> {
+        fn take<'a>(data: &'a [u8], p: &mut usize, n: usize) -> mx_types::Result<&'a [u8]> {
+            let s = data
+                .get(*p..*p + n)
+                .ok_or_else(|| mx_types::Error::Crypto("truncated PreKeySecrets blob".into()))?;
+            *p += n;
+            Ok(s)
+        }
+        fn arr32(s: &[u8]) -> mx_types::Result<[u8; 32]> {
+            s.try_into()
+                .map_err(|_| mx_types::Error::Crypto("bad 32-byte field".into()))
+        }
+        let mut p = 0usize;
+        let signing = arr32(take(data, &mut p, 32)?)?;
+        let id_dh = arr32(take(data, &mut p, 32)?)?;
+        let spk = arr32(take(data, &mut p, 32)?)?;
+        let identity = IdentityKeyPair {
+            signing: SigningKey::from_bytes(&signing),
+            dh_secret: XStaticSecret::from(id_dh),
+        };
+        let spk_secret = XStaticSecret::from(spk);
+        let spk_public = XPublicKey::from(&spk_secret);
+        let spk_sig = identity.sign(spk_public.as_bytes());
+        let signed_prekey = SignedPreKeyPair {
+            secret: spk_secret,
+            public: spk_public,
+            signature: spk_sig,
+        };
+        let one_time_prekey = match take(data, &mut p, 1)?[0] {
+            1 => {
+                let ot = arr32(take(data, &mut p, 32)?)?;
+                let secret = XStaticSecret::from(ot);
+                let public = XPublicKey::from(&secret);
+                Some(OneTimePreKey { secret, public })
+            }
+            _ => None,
+        };
+        let dlen_raw = take(data, &mut p, 4)?;
+        let dlen = u32::from_le_bytes([dlen_raw[0], dlen_raw[1], dlen_raw[2], dlen_raw[3]]) as usize;
+        let decap_bytes = take(data, &mut p, dlen)?;
+        let decap_enc = ml_kem::Encoded::<MlKemDecapKey>::try_from(decap_bytes)
+            .map_err(|_| mx_types::Error::Crypto("bad ML-KEM decap key".into()))?;
+        let decap = MlKemDecapKey::from_bytes(&decap_enc);
+        let elen_raw = take(data, &mut p, 4)?;
+        let elen = u32::from_le_bytes([elen_raw[0], elen_raw[1], elen_raw[2], elen_raw[3]]) as usize;
+        let encap_bytes = take(data, &mut p, elen)?;
+        let encap_enc = ml_kem::Encoded::<MlKemEncapKey>::try_from(encap_bytes)
+            .map_err(|_| mx_types::Error::Crypto("bad ML-KEM encap key".into()))?;
+        let encap = MlKemEncapKey::from_bytes(&encap_enc);
+        Ok(Self {
+            identity,
+            signed_prekey,
+            one_time_prekey,
+            kem: KemKeyPair { decap, encap },
+        })
+    }
+}
+
 /// Generate a full pre-key bundle for `device_id`.
 ///
 /// Every pre-key (signed pre-key, KEM pre-key) carries an Ed25519 signature by the

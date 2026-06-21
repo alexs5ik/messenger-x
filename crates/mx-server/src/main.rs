@@ -353,6 +353,21 @@ async fn fetch_prekeys(
     Ok(Json(bundle))
 }
 
+/// Prekey directory: resolve a *user* to one of their devices' pre-key bundles (consuming a
+/// one-time pre-key), so an initiator can run PQXDH without knowing the device id up front.
+async fn fetch_user_prekey(
+    State(state): State<AppState>,
+    Path(user): Path<UserId>,
+) -> Result<Json<PreKeyBundle>, ApiError> {
+    let devices = state.users.list_devices(user).await?;
+    let device = devices
+        .first()
+        .ok_or_else(|| Error::NotFound(format!("no device for user: {user}")))?
+        .id;
+    let bundle = state.auth.fetch_prekey_bundle(device).await?;
+    Ok(Json(bundle))
+}
+
 /// Ingest an opaque envelope for fan-out. Returns `202 Accepted` once queued.
 async fn ingest_message(
     State(state): State<AppState>,
@@ -563,6 +578,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/register", post(register))
         .route("/v1/prekeys", post(publish_prekeys))
         .route("/v1/prekeys/:device", get(fetch_prekeys))
+        .route("/v1/users/:user/prekey", get(fetch_user_prekey))
         .route("/v1/messages", post(ingest_message))
         .route("/v1/messages/:device", get(pull_messages))
         .route("/v1/ws", get(ws_handler))

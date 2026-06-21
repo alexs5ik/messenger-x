@@ -14,6 +14,9 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 # Post-quantum KEM (NIST FIPS 203 / ML-KEM-768).
 ml-kem = "0.2"
 
+# Serde for transportable handshake messages.
+serde = { version = "1", features = ["derive"] }
+
 # KDF + hash + AEAD.
 hkdf = "0.12"
 sha2 = "0.10"

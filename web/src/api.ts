@@ -39,6 +39,17 @@ export async function register(username: string): Promise<Identity> {
   return { userId: j.user_id, deviceId: j.device_id, token: j.token, username };
 }
 
+// Publish a device's pre-key bundle (JSON string from the wasm crypto layer) so peers can
+// run a PQXDH handshake against it.
+export async function publishPrekeys(bundleJson: string): Promise<void> {
+  const res = await fetch("/v1/prekeys", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bundle: JSON.parse(bundleJson) }),
+  });
+  if (!res.ok) throw new Error(`publish prekeys failed: ${res.status} ${await res.text()}`);
+}
+
 type IncomingHandler = (env: WireEnvelope) => void;
 type StatusHandler = (status: "connecting" | "online" | "offline") => void;
 
@@ -58,6 +69,8 @@ export class MxSocket {
     this.onStatus("connecting");
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/v1/ws`);
+    // The server sends binary frames; receive them as ArrayBuffer so we can decode to text.
+    ws.binaryType = "arraybuffer";
     this.ws = ws;
 
     ws.onopen = () => {
@@ -66,9 +79,11 @@ export class MxSocket {
     };
 
     ws.onmessage = (ev) => {
+      const raw =
+        typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data as ArrayBuffer);
       let msg: { t: string; d: unknown };
       try {
-        msg = JSON.parse(ev.data as string);
+        msg = JSON.parse(raw);
       } catch {
         return;
       }

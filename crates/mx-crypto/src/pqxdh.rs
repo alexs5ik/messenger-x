@@ -51,7 +51,7 @@ impl std::fmt::Debug for SharedSecret {
 /// The message the initiator sends to the responder alongside the first ciphertext so the
 /// responder can reconstruct the shared secret. This is itself public — it carries only
 /// public ephemeral material and a KEM ciphertext.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PqxdhInitMessage {
     /// Alice's identity DH public key (X25519).
     pub initiator_identity: [u8; 32],

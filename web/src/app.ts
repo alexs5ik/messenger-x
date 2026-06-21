@@ -1,8 +1,8 @@
 // Messenger X web client — UI, local state, and wiring between the API, the WebSocket
 // gateway, and the crypto module.
 
-import { register, MxSocket, type Identity, type WireEnvelope } from "./api";
-import { encrypt, decrypt, pqStatus } from "./crypto";
+import { register, publishPrekeys, MxSocket, type Identity, type WireEnvelope } from "./api";
+import { encrypt, decrypt, provisionAccount, pqStatus } from "./crypto";
 
 interface Contact {
   userId: string;
@@ -84,6 +84,11 @@ function renderLogin(): void {
     $("#loginhint").textContent = "Регистрация…";
     try {
       identity = await register(name);
+      // Provision the device's PQXDH account and publish its pre-key bundle so peers can
+      // start encrypted sessions against it.
+      $("#loginhint").textContent = "Генерация ключей (PQXDH)…";
+      const bundle = await provisionAccount(identity.deviceId);
+      await publishPrekeys(bundle);
       sessionStorage.setItem(SS.identity, JSON.stringify(identity));
       startApp();
     } catch (e) {
@@ -288,7 +293,7 @@ async function sendMessage(input: HTMLInputElement): Promise<void> {
 async function onIncoming(env: WireEnvelope): Promise<void> {
   if (!identity) return;
   try {
-    const { from, text } = await decrypt(identity.userId, Uint8Array.from(env.ciphertext));
+    const { from, text } = await decrypt(Uint8Array.from(env.ciphertext));
     ensureContact(from);
     const t = loadThread(from);
     t.push({ mine: false, text, ts: env.ts || Date.now() });

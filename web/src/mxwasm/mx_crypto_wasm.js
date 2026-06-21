@@ -1,6 +1,120 @@
 /* @ts-self-types="./mx_crypto_wasm.d.ts" */
 
 /**
+ * A freshly created device account: the public bundle to publish, plus the secret blob the
+ * device must persist (to answer responder handshakes later). See [`PreKeySecrets::to_bytes`].
+ */
+export class Account {
+    static __wrap(ptr) {
+        const obj = Object.create(Account.prototype);
+        obj.__wbg_ptr = ptr;
+        AccountFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        AccountFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_account_free(ptr, 0);
+    }
+    /**
+     * JSON of the public `PreKeyBundle` to POST to `/v1/prekeys`.
+     * @returns {string}
+     */
+    get bundle_json() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.account_bundle_json(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Opaque secret blob to store locally (e.g. sessionStorage).
+     * @returns {Uint8Array}
+     */
+    get secrets() {
+        const ret = wasm.account_secrets(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+}
+if (Symbol.dispose) Account.prototype[Symbol.dispose] = Account.prototype.free;
+
+/**
+ * The initiator's result: the agreed 32-byte secret and the init message (JSON) to send
+ * alongside the first ciphertext so the responder can derive the same secret.
+ */
+export class InitSession {
+    static __wrap(ptr) {
+        const obj = Object.create(InitSession.prototype);
+        obj.__wbg_ptr = ptr;
+        InitSessionFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        InitSessionFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_initsession_free(ptr, 0);
+    }
+    /**
+     * @returns {string}
+     */
+    get init_json() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.initsession_init_json(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get secret() {
+        const ret = wasm.initsession_secret(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+}
+if (Symbol.dispose) InitSession.prototype[Symbol.dispose] = InitSession.prototype.free;
+
+/**
+ * Create a device account for `device_id` (a UUID string): generate identity + pre-keys,
+ * returning the publishable bundle and the secret blob to keep.
+ * @param {string} device_id
+ * @returns {Account}
+ */
+export function account_create(device_id) {
+    const ptr0 = passStringToWasm0(device_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.account_create(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return Account.__wrap(ret[0]);
+}
+
+/**
  * Inverse of [`seal`]: takes `nonce(12) || ct` and returns the plaintext, or an error if the
  * secret is wrong or the ciphertext was tampered with (AEAD authentication).
  * @param {Uint8Array} secret
@@ -54,6 +168,46 @@ export function seal(secret, plaintext) {
     const ptr1 = passArray8ToWasm0(plaintext, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.seal(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
+ * Initiator side of a real PQXDH session: derive a shared secret against `their_bundle_json`
+ * using my own secrets, returning the secret + the init message to transmit.
+ * @param {Uint8Array} my_secrets
+ * @param {string} their_bundle_json
+ * @returns {InitSession}
+ */
+export function session_initiator(my_secrets, their_bundle_json) {
+    const ptr0 = passArray8ToWasm0(my_secrets, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(their_bundle_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.session_initiator(ptr0, len0, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return InitSession.__wrap(ret[0]);
+}
+
+/**
+ * Responder side: derive the same 32-byte secret from the initiator's init message using my
+ * stored secrets.
+ * @param {Uint8Array} my_secrets
+ * @param {string} init_json
+ * @returns {Uint8Array}
+ */
+export function session_responder(my_secrets, init_json) {
+    const ptr0 = passArray8ToWasm0(my_secrets, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(init_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.session_responder(ptr0, len0, ptr1, len1);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -182,6 +336,13 @@ function __wbg_get_imports() {
     };
 }
 
+const AccountFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_account_free(ptr, 1));
+const InitSessionFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_initsession_free(ptr, 1));
+
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
     wasm.__wbindgen_externrefs.set(idx, obj);
@@ -225,6 +386,43 @@ function passArray8ToWasm0(arg, malloc) {
     return ptr;
 }
 
+function passStringToWasm0(arg, malloc, realloc) {
+    if (realloc === undefined) {
+        const buf = cachedTextEncoder.encode(arg);
+        const ptr = malloc(buf.length, 1) >>> 0;
+        getUint8ArrayMemory0().subarray(ptr, ptr + buf.length).set(buf);
+        WASM_VECTOR_LEN = buf.length;
+        return ptr;
+    }
+
+    let len = arg.length;
+    let ptr = malloc(len, 1) >>> 0;
+
+    const mem = getUint8ArrayMemory0();
+
+    let offset = 0;
+
+    for (; offset < len; offset++) {
+        const code = arg.charCodeAt(offset);
+        if (code > 0x7F) break;
+        mem[ptr + offset] = code;
+    }
+    if (offset !== len) {
+        if (offset !== 0) {
+            arg = arg.slice(offset);
+        }
+        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
+        const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
+        const ret = cachedTextEncoder.encodeInto(arg, view);
+
+        offset += ret.written;
+        ptr = realloc(ptr, len, offset, 1) >>> 0;
+    }
+
+    WASM_VECTOR_LEN = offset;
+    return ptr;
+}
+
 function takeFromExternrefTable0(idx) {
     const value = wasm.__wbindgen_externrefs.get(idx);
     wasm.__externref_table_dealloc(idx);
@@ -243,6 +441,19 @@ function decodeText(ptr, len) {
         numBytesDecoded = len;
     }
     return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+}
+
+const cachedTextEncoder = new TextEncoder();
+
+if (!('encodeInto' in cachedTextEncoder)) {
+    cachedTextEncoder.encodeInto = function (arg, view) {
+        const buf = cachedTextEncoder.encode(arg);
+        view.set(buf);
+        return {
+            read: arg.length,
+            written: buf.length
+        };
+    };
 }
 
 let WASM_VECTOR_LEN = 0;
