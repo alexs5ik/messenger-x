@@ -79,7 +79,7 @@ function markStatus(id: string, status: MsgStatus): void {
 // One check = sent (server accepted); two checks = delivered to the recipient.
 function statusIcon(s?: MsgStatus): string {
   if (s === "delivered")
-    return ` <i class="ti ti-checks" style="color:var(--ok)" title="доставлено"></i>`;
+    return ` <i class="ti ti-checks" style="color:var(--accent)" title="доставлено"></i>`;
   if (s === "sent") return ` <i class="ti ti-check" title="отправлено"></i>`;
   return ` <i class="ti ti-clock" title="отправка…"></i>`;
 }
@@ -211,7 +211,7 @@ function renderApp(): void {
       <aside class="side">
         <div class="side-hd">
           <div class="me">
-            <div class="avatar">${esc(identity!.username.slice(0, 2).toUpperCase())}</div>
+            <div id="meAvatar" class="avatar" role="button" tabindex="0" aria-label="Профиль и настройки">${esc(identity!.username.slice(0, 2).toUpperCase())}</div>
             <div class="me-info">
               <div class="me-name">${esc(identity!.username)}</div>
               <div id="status" class="status offline">оффлайн</div>
@@ -233,10 +233,15 @@ function renderApp(): void {
       <main id="main" class="main"></main>
     </div>`;
   $("#theme").addEventListener("click", cycleTheme);
-  $("#logout").addEventListener("click", () => {
-    socket?.close();
-    sessionStorage.clear();
-    location.reload();
+  $("#logout").addEventListener("click", doLogout);
+  const meAvatar = $("#meAvatar");
+  meAvatar.addEventListener("click", openProfile);
+  meAvatar.addEventListener("keydown", (e) => {
+    const k = (e as KeyboardEvent).key;
+    if (k === "Enter" || k === " ") {
+      e.preventDefault();
+      openProfile();
+    }
   });
   $("#copyid").addEventListener("click", async () => {
     await navigator.clipboard.writeText(identity!.userId);
@@ -248,6 +253,265 @@ function renderApp(): void {
   $("#newchat").addEventListener("click", newChat);
   renderContacts();
   renderMain();
+  mountProfilePanel();
+}
+
+// ---------- Logout (shared by rail button and profile footer) ----------
+function doLogout(): void {
+  socket?.close();
+  sessionStorage.clear();
+  location.reload();
+}
+
+// ---------- Profile & settings panel (right-slide overlay) ----------
+const APP_VERSION = "v0.4.0";
+let mxEscHandler: ((e: KeyboardEvent) => void) | null = null;
+let mxLastFocus: HTMLElement | null = null;
+
+// Build the panel markup. Real data from `identity`; the rest is on-brand placeholder.
+function renderProfilePanel(): string {
+  const uname = identity!.username;
+  const initials = esc(uname.slice(0, 2).toUpperCase());
+  const handle = esc("@" + uname.toLowerCase());
+  const sid = esc(shortId(identity!.userId));
+  const theme = currentTheme();
+
+  const swatch: Record<Theme, [string, string]> = {
+    graphite: ["#202023", "#ffffff"],
+    ivory: ["#e3e3e8", "#ffffff"],
+    onyx: ["#161618", "#2a2a2d"],
+  };
+  const themeTiles = THEMES.map((t) => {
+    const active = t === theme;
+    const [l, r] = swatch[t];
+    return `<button class="mx-theme ${active ? "is-active" : ""}" data-theme="${t}" aria-pressed="${active}">
+      <span class="mx-theme__sw"><span style="background:${l}"></span><span style="background:${r}"></span></span>
+      <span class="mx-theme__lbl">${esc(THEME_LABEL[t])}</span>
+      ${active ? `<i class="ti ti-check mx-theme__chk"></i>` : ""}
+    </button>`;
+  }).join("");
+
+  return `
+  <div class="mx-backdrop" data-close></div>
+  <aside class="mx-panel" role="dialog" aria-modal="true" aria-label="Профиль и настройки">
+    <header class="mx-head">
+      <div class="mx-head__bar">
+        <button class="mx-close" data-close aria-label="Закрыть"><i class="ti ti-x"></i></button>
+      </div>
+      <div class="mx-id">
+        <div class="avatar lg mx-id__av">${initials}</div>
+        <div class="mx-id__txt">
+          <div class="mx-id__name">${esc(uname)}</div>
+          <div class="mx-id__line">
+            <span>${handle}</span><span class="mx-id__dot">·</span>
+            <button id="mxCopyId" class="mx-id__copy" title="Скопировать ваш ID">
+              <span class="mx-id__sid">${sid}…</span> <i class="ti ti-copy"></i>
+            </button>
+          </div>
+          <button class="mx-status" type="button"><i class="ti ti-mood-smile"></i> Установить статус</button>
+        </div>
+      </div>
+      <button class="mx-edit" type="button"><i class="ti ti-edit"></i> Редактировать профиль</button>
+    </header>
+
+    <div class="mx-body">
+      <button class="mx-card mx-card--btn" type="button">
+        <div class="mx-card__head">
+          <i class="ti ti-wallet mx-card__lead"></i>
+          <span class="mx-card__title">Кошелёк</span>
+          <i class="ti ti-chevron-right mx-card__chev"></i>
+        </div>
+        <div class="mx-card__meta">1 240,50 ₮ · доступно</div>
+        <div class="mx-card__rule"></div>
+        <div class="mx-card__pills">
+          <span class="mx-pill"><i class="ti ti-arrows-exchange"></i> Платежи</span>
+          <span class="mx-pill"><i class="ti ti-package"></i> Цифровые товары</span>
+          <span class="mx-pill"><i class="ti ti-coin"></i> Подписки и доходы</span>
+        </div>
+      </button>
+
+      <button class="mx-card mx-card--btn" type="button">
+        <div class="mx-card__head">
+          <i class="ti ti-sparkles mx-card__lead mx-accent"></i>
+          <span class="mx-card__title">AI-ассистент</span>
+          <i class="ti ti-chevron-right mx-card__chev"></i>
+        </div>
+        <div class="mx-card__meta">Включён · на устройстве</div>
+        <div class="mx-card__rule"></div>
+        <div class="mx-row mx-row--incard">
+          <i class="ti ti-robot mx-row__ic"></i>
+          <span class="mx-row__label">AI-агенты</span>
+          <span class="mx-row__trail"><span class="mx-row__val">Маркетплейс</span><i class="ti ti-chevron-right mx-row__chev"></i></span>
+        </div>
+      </button>
+
+      <div class="mx-cap">Сообщество и контент</div>
+      <button class="mx-row" type="button"><i class="ti ti-users-group mx-row__ic"></i><span class="mx-row__label">Создать сообщество</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button"><i class="ti ti-speakerphone mx-row__ic"></i><span class="mx-row__label">Создать канал</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button"><i class="ti ti-message-circle-2 mx-row__ic"></i><span class="mx-row__label">Создать группу</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+
+      <div class="mx-cap">Аккаунты</div>
+      <div class="mx-row mx-row--static"><i class="ti ti-user-circle mx-row__ic"></i><span class="mx-row__label">${handle}</span><span class="mx-row__trail"><span class="mx-badge">Текущий</span></span></div>
+      <button class="mx-row" type="button"><i class="ti ti-switch-horizontal mx-row__ic"></i><span class="mx-row__label">Сменить аккаунт</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button"><i class="ti ti-plus mx-row__ic"></i><span class="mx-row__label">Добавить аккаунт</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+
+      <div class="mx-cap">Приватность и безопасность</div>
+      <div class="mx-card mx-card--pq">
+        <div class="mx-card__head">
+          <i class="ti ti-shield-check mx-card__lead mx-accent" id="mxPqIcon"></i>
+          <span class="mx-card__title" id="mxPqState">Постквантовая защита</span>
+          <span class="mx-badge">Активно</span>
+        </div>
+        <div class="mx-card__meta" id="mxPqSub">Hybrid PQXDH · X25519 + ML-KEM-768</div>
+      </div>
+      <button class="mx-row" type="button"><i class="ti ti-devices mx-row__ic"></i><span class="mx-row__label">Активные сессии</span><span class="mx-row__trail"><span class="mx-row__val">1 устройство</span><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button"><i class="ti ti-lock mx-row__ic"></i><span class="mx-row__label">Конфиденциальность</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button"><i class="ti ti-key mx-row__ic"></i><span class="mx-row__label">Ключи шифрования</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+
+      <div class="mx-cap">Связь</div>
+      <button class="mx-row" type="button"><i class="ti ti-address-book mx-row__ic"></i><span class="mx-row__label">Контакты</span><span class="mx-row__trail"><span class="mx-row__val mx-num">${contacts.length}</span><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button"><i class="ti ti-phone mx-row__ic"></i><span class="mx-row__label">Звонки</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button"><i class="ti ti-bookmark mx-row__ic"></i><span class="mx-row__label">Избранное</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+
+      <div class="mx-cap">Оформление</div>
+      <div class="mx-themes">${themeTiles}</div>
+
+      <div class="mx-cap">Настройки</div>
+      <div class="mx-row mx-row--static"><i class="ti ti-bell mx-row__ic"></i><span class="mx-row__label">Уведомления</span><span class="mx-row__trail"><button class="mx-toggle" id="mxNotif" role="switch" aria-checked="true" aria-label="Уведомления"></button></span></div>
+      <button class="mx-row" type="button"><i class="ti ti-language mx-row__ic"></i><span class="mx-row__label">Язык</span><span class="mx-row__trail"><span class="mx-row__val">Русский</span><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button"><i class="ti ti-settings mx-row__ic"></i><span class="mx-row__label">Настройки</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+    </div>
+
+    <footer class="mx-foot">
+      <span class="mx-ver"><i class="ti ti-shield-lock"></i> Messenger X · ${APP_VERSION}</span>
+      <button class="mx-logout" id="mxLogout" type="button"><i class="ti ti-logout"></i> Выйти</button>
+    </footer>
+  </aside>`;
+}
+
+// Attach listeners after the panel is in the DOM.
+function wireProfilePanel(wrap: HTMLElement): void {
+  wrap.querySelectorAll("[data-close]").forEach((el) =>
+    el.addEventListener("click", closeProfile),
+  );
+
+  const copyBtn = wrap.querySelector("#mxCopyId") as HTMLElement | null;
+  copyBtn?.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(identity!.userId);
+    const el = copyBtn.querySelector(".mx-id__sid")!;
+    const prev = el.textContent;
+    el.textContent = "скопировано!";
+    setTimeout(() => (el.textContent = prev), 1200);
+  });
+
+  const notif = wrap.querySelector("#mxNotif") as HTMLElement | null;
+  notif?.addEventListener("click", () => {
+    notif.setAttribute("aria-checked", notif.getAttribute("aria-checked") === "true" ? "false" : "true");
+  });
+
+  wrap.querySelectorAll(".mx-theme").forEach((tile) =>
+    tile.addEventListener("click", () => {
+      const t = (tile as HTMLElement).dataset.theme as Theme;
+      applyTheme(t);
+      wrap.querySelectorAll(".mx-theme").forEach((el) => {
+        const active = (el as HTMLElement).dataset.theme === t;
+        el.classList.toggle("is-active", active);
+        el.setAttribute("aria-pressed", String(active));
+        const old = el.querySelector(".mx-theme__chk");
+        if (active && !old) {
+          const chk = document.createElement("i");
+          chk.className = "ti ti-check mx-theme__chk";
+          el.appendChild(chk);
+        } else if (!active && old) {
+          old.remove();
+        }
+      });
+      const railBtn = document.querySelector("#theme") as HTMLElement | null;
+      if (railBtn) railBtn.title = `Тема: ${THEME_LABEL[t]}`;
+    }),
+  );
+
+  wrap.querySelector("#mxLogout")?.addEventListener("click", doLogout);
+
+  // Semi-real PQ status, mirroring the sidebar #pqbadge wiring.
+  void pqStatus().then((s) => {
+    const title = wrap.querySelector("#mxPqState") as HTMLElement | null;
+    const sub = wrap.querySelector("#mxPqSub") as HTMLElement | null;
+    const icon = wrap.querySelector("#mxPqIcon") as HTMLElement | null;
+    if (!title || !sub || !icon) return;
+    if (s.ok) {
+      sub.textContent = `E2E · ${s.kem ?? "ML-KEM-768"} ✓`;
+    } else {
+      icon.className = "ti ti-shield-x mx-card__lead";
+      sub.textContent = s.error ?? "self-test failed";
+    }
+  });
+}
+
+// (Re)build the panel as a body-level sibling of #app so renderApp() can't destroy it.
+function mountProfilePanel(): void {
+  document.querySelectorAll(".mx-wrap").forEach((el) => el.remove());
+  const wrap = document.createElement("div");
+  wrap.className = "mx-wrap";
+  wrap.setAttribute("aria-hidden", "true");
+  wrap.innerHTML = renderProfilePanel();
+  document.body.appendChild(wrap);
+  wireProfilePanel(wrap);
+}
+
+function openProfile(): void {
+  const wrap = document.querySelector(".mx-wrap") as HTMLElement | null;
+  if (!wrap || wrap.classList.contains("open")) return;
+  mxLastFocus = document.activeElement as HTMLElement | null;
+  wrap.classList.add("open");
+  wrap.setAttribute("aria-hidden", "false");
+
+  const close = wrap.querySelector(".mx-close") as HTMLElement | null;
+  close?.focus();
+
+  if (!mxEscHandler) {
+    mxEscHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        closeProfile();
+        return;
+      }
+      if (e.key === "Tab") trapTab(wrap, e);
+    };
+    document.addEventListener("keydown", mxEscHandler);
+  }
+}
+
+function closeProfile(): void {
+  const wrap = document.querySelector(".mx-wrap") as HTMLElement | null;
+  if (!wrap) return;
+  wrap.classList.remove("open");
+  wrap.setAttribute("aria-hidden", "true");
+  if (mxEscHandler) {
+    document.removeEventListener("keydown", mxEscHandler);
+    mxEscHandler = null;
+  }
+  mxLastFocus?.focus();
+  mxLastFocus = null;
+}
+
+// Cycle Tab focus within the panel.
+function trapTab(wrap: HTMLElement, e: KeyboardEvent): void {
+  const focusables = Array.from(
+    wrap.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => el.offsetParent !== null);
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const act = document.activeElement;
+  if (e.shiftKey && act === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && act === last) {
+    e.preventDefault();
+    first.focus();
+  }
 }
 
 function renderContacts(): void {
