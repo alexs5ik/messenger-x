@@ -338,6 +338,7 @@ function renderApp(): void {
             <div id="meAvatar" class="avatar" role="button" tabindex="0" aria-label="Профиль и настройки">${avatarInner(profile.avatar, selfInitials())}</div>
             <div class="me-info">
               <div class="me-name">${esc(displayName())}</div>
+              ${profile.status ? `<div class="me-status" id="meStatus">${esc(profile.status)}</div>` : ""}
               <div id="status" class="status offline">оффлайн</div>
             </div>
           </div>
@@ -579,6 +580,22 @@ function wireEditForm(wrap: HTMLElement, body: HTMLElement, focusStatus: boolean
     if (meAv) meAv.innerHTML = avatarInner(profile.avatar, selfInitials());
     const meName = document.querySelector(".me-name") as HTMLElement | null;
     if (meName) meName.textContent = displayName();
+    // Keep the sidebar profile-status line in sync (insert / update / remove).
+    const meInfo = document.querySelector(".me-info") as HTMLElement | null;
+    if (meInfo) {
+      let st = meInfo.querySelector("#meStatus") as HTMLElement | null;
+      if (profile.status) {
+        if (!st) {
+          st = document.createElement("div");
+          st.id = "meStatus";
+          st.className = "me-status";
+          meInfo.insertBefore(st, meInfo.querySelector("#status"));
+        }
+        st.textContent = profile.status;
+      } else if (st) {
+        st.remove();
+      }
+    }
   });
   const focusEl = body.querySelector(focusStatus ? "#mxStatus" : "#mxName") as HTMLInputElement | null;
   focusEl?.focus();

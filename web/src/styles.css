@@ -101,6 +101,7 @@ button.primary:hover { filter: brightness(1.1); }
   color: var(--avatar-txt); display: grid; place-items: center; font-weight: 500; font-size: 14px;
 }
 .avatar.sm { width: 36px; height: 36px; flex-basis: 36px; font-size: 13px; }
+.me-status { font-size: 12px; color: var(--accent); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; }
 .status { font-size: 12px; color: var(--side-txt2); margin-top: 1px; }
 .status.online { color: var(--side-txt2); }
 .icon {
