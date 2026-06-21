@@ -52,6 +52,7 @@ export async function publishPrekeys(bundleJson: string): Promise<void> {
 
 type IncomingHandler = (env: WireEnvelope) => void;
 type StatusHandler = (status: "connecting" | "online" | "offline") => void;
+type AckHandler = (messageId: string) => void;
 
 // A thin wrapper over the mx-server WebSocket gateway. Speaks the mx_transport
 // ClientMessage/ServerMessage framing ({"t":..,"d":..}).
@@ -63,6 +64,7 @@ export class MxSocket {
     private token: string,
     private onIncoming: IncomingHandler,
     private onStatus: StatusHandler,
+    private onAck: AckHandler = () => {},
   ) {}
 
   connect(): void {
@@ -90,8 +92,11 @@ export class MxSocket {
       if (msg.t === "incoming") {
         const env = msg.d as WireEnvelope;
         this.onIncoming(env);
-        // Transport-level delivery receipt.
+        // Transport-level delivery receipt to the server.
         ws.send(JSON.stringify({ t: "ack", d: env.id }));
+      } else if (msg.t === "ack") {
+        // Server accepted one of our sent messages → mark it "sent" (single check).
+        this.onAck(msg.d as string);
       } else if (msg.t === "error") {
         console.warn("server error frame:", msg.d);
       }

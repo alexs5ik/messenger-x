@@ -8,11 +8,17 @@ interface Contact {
   userId: string;
   name: string;
 }
+type MsgStatus = "pending" | "sent" | "delivered";
 interface Msg {
+  id?: string;
   mine: boolean;
   text: string;
   ts: number;
+  status?: MsgStatus;
 }
+
+// Bump when the shape of any stored data changes so old tabs auto-reset instead of breaking.
+const STORAGE_VERSION = "4";
 
 const SS = {
   identity: "mx.identity",
@@ -53,7 +59,55 @@ function ensureContact(userId: string, name?: string): void {
   }
 }
 
+const STATUS_RANK: Record<MsgStatus, number> = { pending: 0, sent: 1, delivered: 2 };
+
+// Upgrade an outgoing message's delivery status (never downgrades) and re-render.
+function markStatus(id: string, status: MsgStatus): void {
+  for (const [peer, msgs] of threads) {
+    const m = msgs.find((x) => x.id === id);
+    if (m) {
+      if (!m.status || STATUS_RANK[status] > STATUS_RANK[m.status]) {
+        m.status = status;
+        saveThread(peer);
+        if (peer === active) renderFeed();
+      }
+      return;
+    }
+  }
+}
+
+// One check = sent (server accepted); two checks = delivered to the recipient.
+function statusIcon(s?: MsgStatus): string {
+  if (s === "delivered")
+    return ` <i class="ti ti-checks" style="color:var(--ok)" title="доставлено"></i>`;
+  if (s === "sent") return ` <i class="ti ti-check" title="отправлено"></i>`;
+  return ` <i class="ti ti-clock" title="отправка…"></i>`;
+}
+
+// Send a delivery receipt for `msgId` back to `toUser` (an opaque Control envelope).
+function sendReceipt(toUser: string, msgId: string): void {
+  if (!socket || !identity) return;
+  const payload = new TextEncoder().encode(JSON.stringify({ t: "receipt", id: msgId }));
+  socket.send({
+    id: crypto.randomUUID(),
+    from: identity.deviceId,
+    to: { direct: toUser },
+    kind: "control",
+    ciphertext: Array.from(payload),
+    ts: Date.now(),
+  });
+}
+
 export function mount(): void {
+  // Self-heal: if stored data is from an older client (different format) or the device was
+  // never provisioned with crypto secrets, wipe and start fresh so nothing silently breaks.
+  const stale =
+    sessionStorage.getItem("mx.ver") !== STORAGE_VERSION ||
+    (sessionStorage.getItem(SS.identity) && !sessionStorage.getItem("mx.secrets"));
+  if (stale) {
+    sessionStorage.clear();
+    sessionStorage.setItem("mx.ver", STORAGE_VERSION);
+  }
   const rawId = sessionStorage.getItem(SS.identity);
   if (rawId) {
     identity = JSON.parse(rawId) as Identity;
@@ -110,7 +164,7 @@ function startApp(): void {
       dot.className = "status " + s;
       dot.textContent = s === "online" ? "на связи" : s === "connecting" ? "подключение" : "оффлайн";
     }
-  });
+  }, (messageId) => markStatus(messageId, "sent"));
   // The server pushes messages over the WebSocket in real time (queued ones on connect,
   // live ones via its per-session hub), so the client just listens — no polling.
   socket.connect();
@@ -239,12 +293,11 @@ function renderFeed(): void {
   if (!feed || !active) return;
   const msgs = loadThread(active);
   feed.innerHTML = msgs
-    .map(
-      (m) =>
-        `<div class="bubble ${m.mine ? "out" : "in"}"><span>${esc(m.text)}</span><time>${new Date(
-          m.ts,
-        ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></div>`,
-    )
+    .map((m) => {
+      const time = new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const tick = m.mine ? statusIcon(m.status) : "";
+      return `<div class="bubble ${m.mine ? "out" : "in"}"><span>${esc(m.text)}</span><time>${time}${tick}</time></div>`;
+    })
     .join("");
   feed.scrollTop = feed.scrollHeight;
 }
@@ -284,7 +337,7 @@ async function sendMessage(input: HTMLInputElement): Promise<void> {
   };
   socket?.send(env);
   const t = loadThread(active);
-  t.push({ mine: true, text, ts: env.ts });
+  t.push({ id: env.id, mine: true, text, ts: env.ts, status: "pending" });
   saveThread(active);
   renderFeed();
   renderContacts();
@@ -292,11 +345,26 @@ async function sendMessage(input: HTMLInputElement): Promise<void> {
 
 async function onIncoming(env: WireEnvelope): Promise<void> {
   if (!identity) return;
+
+  // Control frames carry delivery receipts (cleartext), not chat content.
+  if (env.kind === "control") {
+    try {
+      const ctrl = JSON.parse(new TextDecoder().decode(Uint8Array.from(env.ciphertext))) as {
+        t?: string;
+        id?: string;
+      };
+      if (ctrl.t === "receipt" && ctrl.id) markStatus(ctrl.id, "delivered");
+    } catch {
+      /* ignore malformed control frame */
+    }
+    return;
+  }
+
   try {
     const { from, text } = await decrypt(Uint8Array.from(env.ciphertext));
     ensureContact(from);
     const t = loadThread(from);
-    t.push({ mine: false, text, ts: env.ts || Date.now() });
+    t.push({ id: env.id, mine: false, text, ts: env.ts || Date.now() });
     saveThread(from);
     if (from === active) {
       renderFeed();
@@ -304,6 +372,8 @@ async function onIncoming(env: WireEnvelope): Promise<void> {
       unread.set(from, (unread.get(from) ?? 0) + 1);
     }
     renderContacts();
+    // Acknowledge receipt back to the sender → their message shows two checks.
+    sendReceipt(from, env.id);
   } catch (e) {
     console.warn("decrypt failed (key mismatch or tamper):", e);
   }
