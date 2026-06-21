@@ -1,0 +1,16 @@
+{
+  "name": "messenger-x-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Messenger X web client — talks to mx-server over REST + WebSocket, encrypts client-side.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  }
+}
