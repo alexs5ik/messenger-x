@@ -152,6 +152,7 @@ button.primary:hover { filter: brightness(1.1); }
 .feed { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 9px; }
 .bubble { max-width: 72%; padding: 9px 13px; border-radius: var(--radius); font-size: 13.5px; line-height: 1.45; }
 .bubble span { word-wrap: break-word; }
+.bubble-sender { font-size: 11.5px; font-weight: 500; color: var(--accent); margin-bottom: 2px; }
 .bubble time { display: block; font-size: 10.5px; opacity: 0.7; margin-top: 4px; text-align: right; font-variant-numeric: tabular-nums; }
 .bubble time .ti { font-size: 13px; vertical-align: -2px; margin-left: 3px; }
 .bubble.in { align-self: flex-start; background: var(--bub-in-bg); color: var(--bub-in-txt); border-bottom-left-radius: 5px; }
@@ -311,3 +312,50 @@ button.mx-row:hover { background: var(--side-hover); }
 @media (prefers-reduced-motion: reduce) {
   .mx-panel, .mx-backdrop { transition: none; }
 }
+
+/* ---------- Editable profile: avatar image + status + edit form ---------- */
+.avatar { overflow: hidden; }              /* let an <img> clip to the circle */
+.mx-av-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mx-id__status { color: var(--side-txt2); font-size: 12.5px; margin-top: 3px; }
+
+/* edit form (lives in .mx-body) */
+.mx-edit-form { padding: 4px 16px 18px; display: flex; flex-direction: column; gap: 4px; }
+.mx-edit-av { display: flex; align-items: center; gap: 12px; margin: 6px 0 10px; flex-wrap: wrap; }
+.mx-edit-pick, .mx-edit-rm {
+  border: 1px solid var(--side-line); background: var(--side-hover); color: var(--side-txt);
+  border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px;
+  display: inline-flex; gap: 7px; align-items: center;
+}
+.mx-edit-pick { cursor: pointer; }
+.mx-edit-pick:hover, .mx-edit-rm:hover { border-color: var(--accent); }
+.mx-field { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; }
+.mx-field span { font-size: 12px; color: var(--side-txt2); }
+.mx-field input {
+  padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--side-line);
+  background: var(--field-bg); color: var(--chat-txt); font-size: 14px; outline: none;
+}
+.mx-field input:focus { border-color: var(--accent); }
+.mx-edit-actions { display: flex; gap: 10px; margin-top: 14px; }
+.mx-btn-primary {
+  flex: 1; padding: 11px; border: none; border-radius: var(--radius-sm);
+  background: var(--send-bg); color: var(--send-txt); font-size: 14px; font-weight: 500;
+}
+.mx-btn-primary:hover { filter: brightness(1.1); }
+.mx-btn-ghost {
+  flex: 1; padding: 11px; border: 1px solid var(--side-line); border-radius: var(--radius-sm);
+  background: transparent; color: var(--side-txt2); font-size: 14px;
+}
+.mx-btn-ghost:hover { color: var(--side-txt); border-color: var(--accent); }
+
+/* ---------- Communities / channels / groups ---------- */
+.mx-grp-av { display: flex; align-items: center; justify-content: center; }
+.mx-grp-av i { font-size: 18px; }
+
+/* member multi-select (lives in the create form) */
+.mx-picklist { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; }
+.mx-pick {
+  display: flex; gap: 10px; align-items: center; padding: 9px 8px;
+  border-radius: var(--radius-sm); color: var(--side-txt); font-size: 13.5px; cursor: pointer;
+}
+.mx-pick:hover { background: var(--side-hover); }
+.mx-pick input { accent-color: var(--accent); width: 16px; height: 16px; }

@@ -15,10 +15,37 @@ interface Msg {
   text: string;
   ts: number;
   status?: MsgStatus;
+  from?: string; // sender userId — used to label incoming group messages
 }
 
+// Client-side editable profile, persisted in localStorage (survives a tab close, unlike
+// the sessionStorage-backed identity/threads).
+interface Profile {
+  name?: string;
+  status?: string;
+  avatar?: string; // data URL
+}
+// Communities/channels/groups (pairwise fan-out over the working 1:1 E2E). Stored locally.
+type GroupKind = "community" | "channel" | "group";
+interface Group {
+  id: string;
+  name: string;
+  kind: GroupKind;
+  members: string[]; // userIds, including self
+}
+
+// The STRING passed to encrypt() (and parsed after decrypt()) is JSON of this shape.
+// 1:1 chat wraps as {t:"text"}; groups use ginvite/gtext. Non-JSON or missing `t` is
+// treated as a legacy plain-text message for backward compatibility.
+type AppMsg =
+  | { t: "text"; text: string }
+  | { t: "ginvite"; g: string; name: string; kind: GroupKind; members: string[] }
+  | { t: "gtext"; g: string; text: string };
+
+const LS = { profile: "mx.profile", groups: "mx.groups" };
+
 // Bump when the shape of any stored data changes so old tabs auto-reset instead of breaking.
-const STORAGE_VERSION = "4";
+const STORAGE_VERSION = "5";
 
 const SS = {
   identity: "mx.identity",
@@ -38,6 +65,101 @@ const root = () => $("#app");
 const esc = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 const shortId = (id: string) => id.slice(0, 8);
+
+// ---------- Editable profile (client-side) ----------
+let profile: Profile = {};
+function loadProfile(): void {
+  try {
+    profile = JSON.parse(localStorage.getItem(LS.profile) ?? "{}") as Profile;
+  } catch {
+    profile = {};
+  }
+}
+function saveProfile(): void {
+  localStorage.setItem(LS.profile, JSON.stringify(profile));
+}
+function displayName(): string {
+  return profile.name?.trim() || identity!.username;
+}
+function selfInitials(): string {
+  return esc(displayName().slice(0, 2).toUpperCase());
+}
+// Render an avatar's inner content: <img> when a data URL is set, else initials text.
+function avatarInner(avatar: string | undefined, initials: string): string {
+  return avatar ? `<img src="${esc(avatar)}" alt="" class="mx-av-img" />` : initials;
+}
+
+// Read an image File, center-crop into a <=256px square canvas, return a JPEG data URL.
+function fileToAvatar(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const size = 256;
+      const side = Math.min(img.width, img.height);
+      const sx = (img.width - side) / 2;
+      const sy = (img.height - side) / 2;
+      const cv = document.createElement("canvas");
+      cv.width = size;
+      cv.height = size;
+      const ctx = cv.getContext("2d")!;
+      ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+      resolve(cv.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("bad image"));
+    };
+    img.src = url;
+  });
+}
+
+// ---------- Communities / channels / groups (client-side, pairwise fan-out) ----------
+let groups: Group[] = [];
+function loadGroups(): void {
+  try {
+    groups = JSON.parse(localStorage.getItem(LS.groups) ?? "[]") as Group[];
+  } catch {
+    groups = [];
+  }
+}
+function saveGroups(): void {
+  localStorage.setItem(LS.groups, JSON.stringify(groups));
+}
+function findGroup(id: string): Group | undefined {
+  return groups.find((g) => g.id === id);
+}
+function upsertGroup(g: Group): void {
+  if (!findGroup(g.id)) {
+    groups.push(g);
+    saveGroups();
+  }
+}
+const KIND_ICON: Record<GroupKind, string> = {
+  community: "ti-users-group",
+  channel: "ti-speakerphone",
+  group: "ti-users",
+};
+const KIND_LABEL: Record<GroupKind, string> = {
+  community: "Сообщество",
+  channel: "Канал",
+  group: "Группа",
+};
+
+// Encrypt a structured AppMsg to one peer and send it as a Direct chat envelope.
+async function sendApp(peer: string, msg: AppMsg): Promise<void> {
+  if (!identity) return;
+  const payload = await encrypt(identity.userId, peer, JSON.stringify(msg));
+  socket?.send({
+    id: crypto.randomUUID(),
+    from: identity.deviceId,
+    to: { direct: peer },
+    kind: "chat",
+    ciphertext: Array.from(payload),
+    ts: Date.now(),
+  });
+}
 
 function loadThread(peer: string): Msg[] {
   if (!threads.has(peer)) {
@@ -177,6 +299,8 @@ function renderLogin(): void {
 
 // ---------- App ----------
 function startApp(): void {
+  loadProfile();
+  loadGroups();
   renderApp();
   socket = new MxSocket(identity!.token, onIncoming, (s) => {
     const dot = document.querySelector("#status") as HTMLElement | null;
@@ -211,9 +335,9 @@ function renderApp(): void {
       <aside class="side">
         <div class="side-hd">
           <div class="me">
-            <div id="meAvatar" class="avatar" role="button" tabindex="0" aria-label="Профиль и настройки">${esc(identity!.username.slice(0, 2).toUpperCase())}</div>
+            <div id="meAvatar" class="avatar" role="button" tabindex="0" aria-label="Профиль и настройки">${avatarInner(profile.avatar, selfInitials())}</div>
             <div class="me-info">
-              <div class="me-name">${esc(identity!.username)}</div>
+              <div class="me-name">${esc(displayName())}</div>
               <div id="status" class="status offline">оффлайн</div>
             </div>
           </div>
@@ -260,6 +384,9 @@ function renderApp(): void {
 function doLogout(): void {
   socket?.close();
   sessionStorage.clear();
+  // Reset device-bound profile & groups so the next account starts clean (keep theme).
+  localStorage.removeItem(LS.profile);
+  localStorage.removeItem(LS.groups);
   location.reload();
 }
 
@@ -270,9 +397,9 @@ let mxLastFocus: HTMLElement | null = null;
 
 // Build the panel markup. Real data from `identity`; the rest is on-brand placeholder.
 function renderProfilePanel(): string {
-  const uname = identity!.username;
+  const uname = displayName();
   const initials = esc(uname.slice(0, 2).toUpperCase());
-  const handle = esc("@" + uname.toLowerCase());
+  const handle = esc("@" + identity!.username.toLowerCase());
   const sid = esc(shortId(identity!.userId));
   const theme = currentTheme();
 
@@ -299,9 +426,10 @@ function renderProfilePanel(): string {
         <button class="mx-close" data-close aria-label="Закрыть"><i class="ti ti-x"></i></button>
       </div>
       <div class="mx-id">
-        <div class="avatar lg mx-id__av">${initials}</div>
+        <div class="avatar lg mx-id__av">${avatarInner(profile.avatar, initials)}</div>
         <div class="mx-id__txt">
           <div class="mx-id__name">${esc(uname)}</div>
+          ${profile.status ? `<div class="mx-id__status">${esc(profile.status)}</div>` : ""}
           <div class="mx-id__line">
             <span>${handle}</span><span class="mx-id__dot">·</span>
             <button id="mxCopyId" class="mx-id__copy" title="Скопировать ваш ID">
@@ -346,9 +474,9 @@ function renderProfilePanel(): string {
       </button>
 
       <div class="mx-cap">Сообщество и контент</div>
-      <button class="mx-row" type="button"><i class="ti ti-users-group mx-row__ic"></i><span class="mx-row__label">Создать сообщество</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
-      <button class="mx-row" type="button"><i class="ti ti-speakerphone mx-row__ic"></i><span class="mx-row__label">Создать канал</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
-      <button class="mx-row" type="button"><i class="ti ti-message-circle-2 mx-row__ic"></i><span class="mx-row__label">Создать группу</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button" data-create="community"><i class="ti ti-users-group mx-row__ic"></i><span class="mx-row__label">Создать сообщество</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button" data-create="channel"><i class="ti ti-speakerphone mx-row__ic"></i><span class="mx-row__label">Создать канал</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
+      <button class="mx-row" type="button" data-create="group"><i class="ti ti-message-circle-2 mx-row__ic"></i><span class="mx-row__label">Создать группу</span><span class="mx-row__trail"><i class="ti ti-chevron-right mx-row__chev"></i></span></button>
 
       <div class="mx-cap">Аккаунты</div>
       <div class="mx-row mx-row--static"><i class="ti ti-user-circle mx-row__ic"></i><span class="mx-row__label">${handle}</span><span class="mx-row__trail"><span class="mx-badge">Текущий</span></span></div>
@@ -389,11 +517,150 @@ function renderProfilePanel(): string {
   </aside>`;
 }
 
+// ---------- Edit-profile form (swaps the panel body in place) ----------
+function renderEditForm(): string {
+  const av = profile.avatar;
+  return `
+  <form class="mx-edit-form" id="mxEditForm">
+    <div class="mx-cap">Редактирование профиля</div>
+    <div class="mx-edit-av">
+      <div class="avatar lg" id="mxEditAv">${avatarInner(av, selfInitials())}</div>
+      <label class="mx-edit-pick">
+        <i class="ti ti-camera"></i> Загрузить фото
+        <input type="file" accept="image/*" id="mxAvFile" hidden />
+      </label>
+      ${av ? `<button type="button" class="mx-edit-rm" id="mxAvRm"><i class="ti ti-trash"></i> Убрать</button>` : ""}
+    </div>
+    <label class="mx-field"><span>Имя</span>
+      <input id="mxName" maxlength="48" value="${esc(profile.name ?? "")}" placeholder="${esc(identity!.username)}" /></label>
+    <label class="mx-field"><span>Статус</span>
+      <input id="mxStatus" maxlength="80" value="${esc(profile.status ?? "")}" placeholder="Например: на связи 🙂" /></label>
+    <div class="mx-edit-actions">
+      <button type="button" class="mx-btn-ghost" id="mxEditCancel">Отмена</button>
+      <button type="submit" class="mx-btn-primary" id="mxEditSave">Сохранить</button>
+    </div>
+  </form>`;
+}
+
+function enterEdit(wrap: HTMLElement, focusStatus: boolean): void {
+  const body = wrap.querySelector(".mx-body") as HTMLElement;
+  body.innerHTML = renderEditForm();
+  wireEditForm(wrap, body, focusStatus);
+}
+
+function wireEditForm(wrap: HTMLElement, body: HTMLElement, focusStatus: boolean): void {
+  let pendingAvatar = profile.avatar; // local until Save
+  const avBox = body.querySelector("#mxEditAv") as HTMLElement;
+  const file = body.querySelector("#mxAvFile") as HTMLInputElement;
+  file.addEventListener("change", async () => {
+    const f = file.files?.[0];
+    if (!f) return;
+    try {
+      pendingAvatar = await fileToAvatar(f);
+      avBox.innerHTML = `<img src="${esc(pendingAvatar)}" alt="" class="mx-av-img" />`;
+    } catch {
+      /* ignore bad image */
+    }
+  });
+  body.querySelector("#mxAvRm")?.addEventListener("click", () => {
+    pendingAvatar = undefined;
+    avBox.textContent = displayName().slice(0, 2).toUpperCase();
+  });
+  body.querySelector("#mxEditCancel")?.addEventListener("click", () => exitEdit(wrap));
+  (body.querySelector("#mxEditForm") as HTMLFormElement).addEventListener("submit", (e) => {
+    e.preventDefault();
+    const name = (body.querySelector("#mxName") as HTMLInputElement).value.trim();
+    const status = (body.querySelector("#mxStatus") as HTMLInputElement).value.trim();
+    profile = { name: name || undefined, status: status || undefined, avatar: pendingAvatar };
+    saveProfile();
+    exitEdit(wrap);
+    // Reflect in the sidebar without rebuilding the whole app.
+    const meAv = document.querySelector("#meAvatar") as HTMLElement | null;
+    if (meAv) meAv.innerHTML = avatarInner(profile.avatar, selfInitials());
+    const meName = document.querySelector(".me-name") as HTMLElement | null;
+    if (meName) meName.textContent = displayName();
+  });
+  const focusEl = body.querySelector(focusStatus ? "#mxStatus" : "#mxName") as HTMLInputElement | null;
+  focusEl?.focus();
+}
+
+// Rebuild the panel content cleanly (header reflects the new name/avatar/status) while keeping it open.
+function exitEdit(wrap: HTMLElement): void {
+  const wasOpen = wrap.classList.contains("open");
+  wrap.innerHTML = renderProfilePanel();
+  wireProfilePanel(wrap);
+  if (wasOpen) {
+    wrap.classList.add("open");
+    wrap.setAttribute("aria-hidden", "false");
+  }
+}
+
+// ---------- Create community/channel/group (swaps the panel body, same as edit) ----------
+function renderCreateForm(kind: GroupKind): string {
+  const opts =
+    contacts
+      .map(
+        (c) =>
+          `<label class="mx-pick"><input type="checkbox" value="${esc(c.userId)}" /><span>${esc(c.name)}</span></label>`,
+      )
+      .join("") || `<p class="empty">Сначала добавьте контакты через «Новый чат».</p>`;
+  return `
+  <form class="mx-edit-form" id="mxCreateForm">
+    <div class="mx-cap">Создать: ${esc(KIND_LABEL[kind])}</div>
+    <label class="mx-field"><span>Название</span>
+      <input id="mxGName" maxlength="48" placeholder="${esc(KIND_LABEL[kind])}" /></label>
+    <div class="mx-cap">Участники</div>
+    <div class="mx-picklist">${opts}</div>
+    <div class="mx-edit-actions">
+      <button type="button" class="mx-btn-ghost" id="mxCCancel">Отмена</button>
+      <button type="submit" class="mx-btn-primary">Создать</button>
+    </div>
+  </form>`;
+}
+
+function openCreateGroup(kind: GroupKind): void {
+  const wrap = document.querySelector(".mx-wrap") as HTMLElement | null;
+  if (!wrap) return;
+  const body = wrap.querySelector(".mx-body") as HTMLElement;
+  body.innerHTML = renderCreateForm(kind);
+  body.querySelector("#mxCCancel")?.addEventListener("click", () => exitEdit(wrap));
+  (body.querySelector("#mxCreateForm") as HTMLFormElement).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name =
+      (body.querySelector("#mxGName") as HTMLInputElement).value.trim() || KIND_LABEL[kind];
+    const picked = Array.from(
+      body.querySelectorAll<HTMLInputElement>(".mx-pick input:checked"),
+    ).map((i) => i.value);
+    const members = Array.from(new Set([identity!.userId, ...picked]));
+    const g: Group = { id: crypto.randomUUID(), name, kind, members };
+    upsertGroup(g);
+    // Fan-out an invite to every member except self over their per-peer 1:1 channel.
+    for (const m of members) {
+      if (m === identity!.userId) continue;
+      await sendApp(m, { t: "ginvite", g: g.id, name, kind, members });
+    }
+    closeProfile();
+    renderContacts();
+    selectPeer(g.id);
+  });
+  const focusEl = body.querySelector("#mxGName") as HTMLInputElement | null;
+  focusEl?.focus();
+}
+
 // Attach listeners after the panel is in the DOM.
 function wireProfilePanel(wrap: HTMLElement): void {
   wrap.querySelectorAll("[data-close]").forEach((el) =>
     el.addEventListener("click", closeProfile),
   );
+
+  wrap.querySelector(".mx-edit")?.addEventListener("click", () => enterEdit(wrap, false));
+  wrap.querySelector(".mx-status")?.addEventListener("click", () => enterEdit(wrap, true));
+
+  wrap
+    .querySelectorAll<HTMLElement>("[data-create]")
+    .forEach((b) =>
+      b.addEventListener("click", () => openCreateGroup(b.dataset.create as GroupKind)),
+    );
 
   const copyBtn = wrap.querySelector("#mxCopyId") as HTMLElement | null;
   copyBtn?.addEventListener("click", async () => {
@@ -516,11 +783,29 @@ function trapTab(wrap: HTMLElement, e: KeyboardEvent): void {
 
 function renderContacts(): void {
   const box = $("#contacts");
-  if (!contacts.length) {
+  if (!contacts.length && !groups.length) {
     box.innerHTML = `<p class="empty">Нет чатов. Нажмите «Новый чат» и вставьте ID собеседника.</p>`;
     return;
   }
-  box.innerHTML = contacts
+  const groupRows = groups
+    .map((g) => {
+      const t = loadThread(g.id);
+      const last = t.length ? t[t.length - 1] : null;
+      const u = unread.get(g.id) ?? 0;
+      const sub = last
+        ? esc((last.mine ? "Вы: " : "") + last.text).slice(0, 32)
+        : `${KIND_LABEL[g.kind]} · ${g.members.length}`;
+      return `<button class="contact ${g.id === active ? "active" : ""}" data-id="${g.id}" data-group="1">
+        <div class="avatar sm mx-grp-av"><i class="ti ${KIND_ICON[g.kind]}"></i></div>
+        <div class="c-info">
+          <div class="c-name">${esc(g.name)}</div>
+          <div class="c-last">${sub}</div>
+        </div>
+        ${u ? `<span class="unread">${u}</span>` : ""}
+      </button>`;
+    })
+    .join("");
+  const contactRows = contacts
     .map((c) => {
       const t = loadThread(c.userId);
       const last = t.length ? t[t.length - 1] : null;
@@ -535,6 +820,7 @@ function renderContacts(): void {
       </button>`;
     })
     .join("");
+  box.innerHTML = groupRows + contactRows;
   box.querySelectorAll(".contact").forEach((b) =>
     b.addEventListener("click", () => selectPeer((b as HTMLElement).dataset.id!)),
   );
@@ -544,6 +830,31 @@ function renderMain(): void {
   const main = $("#main");
   if (!active) {
     main.innerHTML = `<div class="placeholder"><i class="ti ti-messages"></i><p>Выберите чат или начните новый</p></div>`;
+    return;
+  }
+  const grp = findGroup(active);
+  if (grp) {
+    main.innerHTML = `
+    <div class="chat-hd">
+      <div class="avatar sm mx-grp-av"><i class="ti ${KIND_ICON[grp.kind]}"></i></div>
+      <div class="chat-hd-info">
+        <div class="chat-name">${esc(grp.name)}</div>
+        <div class="chat-sub"><i class="ti ti-lock"></i> ${KIND_LABEL[grp.kind]} · ${grp.members.length} участн. · E2E pairwise</div>
+      </div>
+    </div>
+    <div id="feed" class="feed"></div>
+    <div class="inbar">
+      <input id="msg" placeholder="Сообщение в «${esc(grp.name)}»…" autocomplete="off" />
+      <button id="send" class="icon send" aria-label="Отправить"><i class="ti ti-send"></i></button>
+    </div>`;
+    renderFeed();
+    const ginput = $("#msg") as HTMLInputElement;
+    ginput.focus();
+    const gsend = () => sendMessage(ginput);
+    $("#send").addEventListener("click", gsend);
+    ginput.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") gsend();
+    });
     return;
   }
   const contact = contacts.find((c) => c.userId === active)!;
@@ -574,15 +885,27 @@ function renderMain(): void {
   });
 }
 
+function senderLabel(userId: string): string {
+  const c = contacts.find((x) => x.userId === userId);
+  return c ? c.name : shortId(userId);
+}
+
 function renderFeed(): void {
   const feed = document.querySelector("#feed") as HTMLElement | null;
   if (!feed || !active) return;
+  const grp = findGroup(active);
   const msgs = loadThread(active);
   feed.innerHTML = msgs
     .map((m) => {
       const time = new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      const tick = m.mine ? statusIcon(m.status) : "";
-      return `<div class="bubble ${m.mine ? "out" : "in"}"><span>${esc(m.text)}</span><time>${time}${tick}</time></div>`;
+      // Groups don't carry per-message receipts, so no tick there.
+      const tick = m.mine && !grp ? statusIcon(m.status) : "";
+      // In a group, label each incoming bubble with the sender so 3+ way chats are clear.
+      const sender =
+        grp && !m.mine && m.from
+          ? `<div class="bubble-sender">${esc(senderLabel(m.from))}</div>`
+          : "";
+      return `<div class="bubble ${m.mine ? "out" : "in"}">${sender}<span>${esc(m.text)}</span><time>${time}${tick}</time></div>`;
     })
     .join("");
   feed.scrollTop = feed.scrollHeight;
@@ -612,7 +935,24 @@ async function sendMessage(input: HTMLInputElement): Promise<void> {
   const text = input.value.trim();
   if (!text || !active || !identity) return;
   input.value = "";
-  const payload = await encrypt(identity.userId, active, text);
+
+  const grp = findGroup(active);
+  if (grp) {
+    // Fan-out the message to each member's per-peer 1:1 channel. Groups skip receipts.
+    for (const m of grp.members) {
+      if (m === identity.userId) continue;
+      await sendApp(m, { t: "gtext", g: grp.id, text });
+    }
+    const gt = loadThread(grp.id);
+    gt.push({ id: crypto.randomUUID(), mine: true, text, ts: Date.now() });
+    saveThread(grp.id);
+    renderFeed();
+    renderContacts();
+    return;
+  }
+
+  // 1:1 — wrap as {t:"text"} but keep the SAME envelope id so receipts still correlate.
+  const payload = await encrypt(identity.userId, active, JSON.stringify({ t: "text", text }));
   const env: WireEnvelope = {
     id: crypto.randomUUID(),
     from: identity.deviceId,
@@ -648,9 +988,44 @@ async function onIncoming(env: WireEnvelope): Promise<void> {
 
   try {
     const { from, text } = await decrypt(Uint8Array.from(env.ciphertext));
+
+    // The plaintext is JSON {t:...} for v5 clients; non-JSON or missing `t` is legacy text.
+    let app: AppMsg | null = null;
+    try {
+      const parsed = JSON.parse(text) as { t?: unknown };
+      if (parsed && typeof parsed.t === "string") app = parsed as AppMsg;
+    } catch {
+      /* not JSON → legacy plain text */
+    }
+
+    if (app && app.t === "ginvite") {
+      upsertGroup({ id: app.g, name: app.name, kind: app.kind, members: app.members });
+      renderContacts();
+      // Groups don't use delivery receipts.
+      return;
+    }
+
+    if (app && app.t === "gtext") {
+      if (!findGroup(app.g)) {
+        upsertGroup({ id: app.g, name: "Группа", kind: "group", members: [identity.userId, from] });
+      }
+      const gt = loadThread(app.g);
+      gt.push({ id: env.id, mine: false, text: app.text, ts: env.ts || Date.now(), from });
+      saveThread(app.g);
+      if (app.g === active) {
+        renderFeed();
+      } else {
+        unread.set(app.g, (unread.get(app.g) ?? 0) + 1);
+      }
+      renderContacts();
+      return;
+    }
+
+    // 1:1 text — {t:"text"} or a legacy raw string.
+    const body = app && app.t === "text" ? app.text : text;
     ensureContact(from);
     const t = loadThread(from);
-    t.push({ id: env.id, mine: false, text, ts: env.ts || Date.now() });
+    t.push({ id: env.id, mine: false, text: body, ts: env.ts || Date.now() });
     saveThread(from);
     if (from === active) {
       renderFeed();
