@@ -30,6 +30,7 @@
 
 pub mod memory;
 pub mod model;
+pub mod persist;
 pub mod traits;
 
 #[cfg(feature = "postgres")]

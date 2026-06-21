@@ -8,6 +8,8 @@ description = "Persistence layer: trait abstractions + in-memory impls, with a s
 mx-types = { path = "../mx-types" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["sync", "macros", "rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Optional backends. Gated behind features so the default build needs no live DB.
 # `sqlx` is pulled without compile-time-checked macros (no `macros`/`migrate` features)

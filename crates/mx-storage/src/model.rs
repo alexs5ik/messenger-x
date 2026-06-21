@@ -6,13 +6,15 @@
 //! Crucially, none of these records ever contain message plaintext — only identities and
 //! public key material — consistent with the "server stores ciphertext only" principle.
 
+use serde::{Deserialize, Serialize};
+
 use mx_types::{DeviceId, PublicKey, UserId};
 
 /// A registered human account as the backend stores it.
 ///
 /// The server keeps no secret about the user beyond routing identity; all message content
 /// is end-to-end encrypted and opaque to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     /// Stable account identifier.
     pub id: UserId,
@@ -43,7 +45,7 @@ impl User {
 ///
 /// Crypto sessions are per-device (Signal-style multi-device fan-out), so each device
 /// carries its own long-term identity public key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
     /// Stable device identifier.
     pub id: DeviceId,

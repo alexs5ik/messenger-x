@@ -38,6 +38,24 @@ impl InMemoryUserStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Export all users and devices (for snapshot persistence).
+    pub async fn export(&self) -> (Vec<User>, Vec<Device>) {
+        let st = self.inner.read().await;
+        let users = st.users.values().cloned().collect();
+        let devices = st.devices.values().flatten().cloned().collect();
+        (users, devices)
+    }
+
+    /// Replace contents with the given users and devices (for snapshot restore).
+    pub async fn import(&self, users: Vec<User>, devices: Vec<Device>) {
+        let mut st = self.inner.write().await;
+        st.users = users.into_iter().map(|u| (u.id, u)).collect();
+        st.devices.clear();
+        for d in devices {
+            st.devices.entry(d.user_id).or_default().push(d);
+        }
+    }
 }
 
 #[async_trait]
@@ -114,6 +132,17 @@ impl InMemoryPreKeyStore {
     /// Create an empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Export all stored bundles (for snapshot persistence).
+    pub async fn export(&self) -> Vec<PreKeyBundle> {
+        self.inner.lock().await.values().cloned().collect()
+    }
+
+    /// Replace contents with the given bundles (for snapshot restore).
+    pub async fn import(&self, bundles: Vec<PreKeyBundle>) {
+        let mut map = self.inner.lock().await;
+        *map = bundles.into_iter().map(|b| (b.device_id, b)).collect();
     }
 }
 
@@ -202,6 +231,25 @@ impl InMemoryGroupStore {
     /// Create an empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Export all groups as `(id, members, opaque_state)` tuples (for snapshot persistence).
+    pub async fn export(&self) -> Vec<(GroupId, Vec<UserId>, Option<Vec<u8>>)> {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .map(|(id, rec)| (*id, rec.members.clone(), rec.state.clone()))
+            .collect()
+    }
+
+    /// Replace contents from exported tuples (for snapshot restore).
+    pub async fn import(&self, groups: Vec<(GroupId, Vec<UserId>, Option<Vec<u8>>)>) {
+        let mut map = self.inner.write().await;
+        *map = groups
+            .into_iter()
+            .map(|(id, members, state)| (id, GroupRecord { members, state }))
+            .collect();
     }
 }
 

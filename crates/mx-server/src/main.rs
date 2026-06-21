@@ -125,6 +125,10 @@ struct AppState {
     ai: Arc<AiOrchestrator>,
     /// Live WebSocket session registry for real-time push.
     hub: Arc<Hub>,
+    /// Store handles retained for snapshot persistence (so a restart is non-destructive).
+    users: Arc<InMemoryUserStore>,
+    prekeys: Arc<InMemoryPreKeyStore>,
+    groups: Arc<InMemoryGroupStore>,
 }
 
 impl AppState {
@@ -144,8 +148,13 @@ impl AppState {
         let auth = AuthService::new(users_dyn, prekeys_dyn, token_secret);
 
         // `MessagingService` owns its stores by value; the `Arc` blanket impls make the
-        // shared handles satisfy the store traits, so it routes over the *same* state.
-        let messaging = Arc::new(MessagingService::new(users, groups, queue));
+        // shared handles satisfy the store traits, so it routes over the *same* state. We
+        // clone the handles (cheap Arc bumps) so AppState can also reach them for snapshots.
+        let messaging = Arc::new(MessagingService::new(
+            users.clone(),
+            groups.clone(),
+            queue,
+        ));
 
         Self {
             auth,
@@ -153,6 +162,31 @@ impl AppState {
             presence: Arc::new(Mutex::new(PresenceService::new())),
             ai: Arc::new(AiOrchestrator::with_mock_providers()),
             hub: Arc::new(Hub::default()),
+            users,
+            prekeys,
+            groups,
+        }
+    }
+
+    /// Load durable state from a snapshot file (if present) into the stores.
+    async fn load_snapshot(&self, path: &std::path::Path) {
+        match mx_storage::persist::Snapshot::load(path) {
+            Ok(Some(snap)) => {
+                let users = snap.users.len();
+                snap.apply(&self.users, &self.prekeys, &self.groups).await;
+                tracing::info!(users, ?path, "restored state snapshot");
+            }
+            Ok(None) => tracing::info!(?path, "no snapshot yet; starting empty"),
+            Err(e) => tracing::warn!(error = %e, ?path, "failed to read snapshot; starting empty"),
+        }
+    }
+
+    /// Write the current durable state to the snapshot file.
+    async fn save_snapshot(&self, path: &std::path::Path) {
+        let snap =
+            mx_storage::persist::Snapshot::capture(&self.users, &self.prekeys, &self.groups).await;
+        if let Err(e) = snap.save(path) {
+            tracing::warn!(error = %e, ?path, "failed to write snapshot");
         }
     }
 
@@ -558,6 +592,26 @@ async fn main() {
     });
 
     let state = AppState::new(token_secret);
+
+    // Durable state: load a snapshot on boot and persist periodically so a restart does not
+    // wipe accounts (clients hold long-lived tokens). Path is overridable via MX_DATA_FILE.
+    let snapshot_path = std::path::PathBuf::from(
+        std::env::var("MX_DATA_FILE").unwrap_or_else(|_| "data/state.json".to_string()),
+    );
+    state.load_snapshot(&snapshot_path).await;
+    {
+        let saver = state.clone();
+        let path = snapshot_path.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(3));
+            loop {
+                tick.tick().await;
+                saver.save_snapshot(&path).await;
+            }
+        });
+    }
+
+    let shutdown_state = state.clone();
     let router = app(state);
 
     let addr: SocketAddr = bind_addr
@@ -573,6 +627,10 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+
+    // Final flush so a clean shutdown loses nothing since the last periodic save.
+    shutdown_state.save_snapshot(&snapshot_path).await;
+    tracing::info!("state snapshot saved on shutdown");
 }
 
 /// Resolve when a Ctrl-C (SIGINT) is received, triggering graceful shutdown.
