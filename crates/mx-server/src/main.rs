@@ -28,6 +28,7 @@
 //! | `GET  /v1/messages/:device`  | Drain a device's queued envelopes (JSON array).    |
 //! | `GET  /v1/ws`                | WebSocket gateway (auth → send/receive loop).      |
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -47,6 +48,7 @@ use futures_util::{
     stream::{SplitSink, SplitStream, StreamExt},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
 use mx_ai::AiOrchestrator;
@@ -71,6 +73,41 @@ type Messaging = MessagingService<
     Arc<InMemoryMessageQueue>,
 >;
 
+/// Registry of live WebSocket sessions: device → a notify channel for that session.
+///
+/// The durable queue ([`Messaging::pull`]) remains the single source of truth for message
+/// content; the hub only carries a wake-up *signal*. After an envelope is ingested, each
+/// recipient device that has a live session is signaled, and that session drains the queue
+/// and pushes the new envelopes immediately — real-time delivery without a polling loop.
+/// Because delivery always goes through the atomic `pull`, each envelope is handed out
+/// exactly once whether it is flushed on connect or pushed live.
+#[derive(Default)]
+struct Hub {
+    sessions: Mutex<HashMap<DeviceId, mpsc::UnboundedSender<()>>>,
+}
+
+impl Hub {
+    /// Register a session for `device`, returning the receiver it should await. Replaces any
+    /// previous session for the same device (last connection wins).
+    async fn register(&self, device: DeviceId) -> mpsc::UnboundedReceiver<()> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.sessions.lock().await.insert(device, tx);
+        rx
+    }
+
+    /// Remove a device's session on disconnect.
+    async fn unregister(&self, device: DeviceId) {
+        self.sessions.lock().await.remove(&device);
+    }
+
+    /// Wake the live session for `device`, if any, to pull pending messages.
+    async fn notify(&self, device: DeviceId) {
+        if let Some(tx) = self.sessions.lock().await.get(&device) {
+            let _ = tx.send(());
+        }
+    }
+}
+
 /// Shared application state, cloned cheaply into every request handler.
 ///
 /// All fields are reference-counted handles; cloning an [`AppState`] clones the [`Arc`]s,
@@ -86,6 +123,8 @@ struct AppState {
     /// Tiered AI router (envelope-rule enforcement). Held for completeness / future routes.
     #[allow(dead_code)]
     ai: Arc<AiOrchestrator>,
+    /// Live WebSocket session registry for real-time push.
+    hub: Arc<Hub>,
 }
 
 impl AppState {
@@ -113,6 +152,33 @@ impl AppState {
             messaging,
             presence: Arc::new(Mutex::new(PresenceService::new())),
             ai: Arc::new(AiOrchestrator::with_mock_providers()),
+            hub: Arc::new(Hub::default()),
+        }
+    }
+
+    /// Deliver any pending envelopes for `device` over the socket. Returns `false` if the
+    /// socket is gone. Shared by the connect-time flush and the live-push wake-up.
+    async fn deliver_pending(&self, device: DeviceId, sender: &mut WsSink) -> bool {
+        match self.messaging.pull(device).await {
+            Ok(pending) => {
+                for env in pending {
+                    if !send_frame(sender, ServerMessage::Incoming(env)).await {
+                        return false;
+                    }
+                }
+                true
+            }
+            Err(_) => true,
+        }
+    }
+
+    /// After an envelope is accepted, wake every recipient device that has a live session so
+    /// it pulls and pushes the message immediately.
+    async fn notify_recipients(&self, to: &mx_types::Recipient) {
+        if let Ok(devices) = self.messaging.recipients(to).await {
+            for d in devices {
+                self.hub.notify(d).await;
+            }
         }
     }
 }
@@ -258,7 +324,9 @@ async fn ingest_message(
     State(state): State<AppState>,
     Json(WireEnvelope(envelope)): Json<WireEnvelope>,
 ) -> Result<StatusCode, ApiError> {
+    let to = envelope.to.clone();
     state.messaging.ingest(envelope).await?;
+    state.notify_recipients(&to).await;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -308,76 +376,95 @@ async fn ws_session(state: AppState, socket: WebSocket) {
         }
     };
 
-    // Mark online and flush anything queued while the device was away.
+    // Register for live push and mark online, then flush anything queued while away.
+    let mut wake = state.hub.register(device).await;
     {
         let mut presence = state.presence.lock().await;
         presence.set_online(device, ONLINE_TTL);
     }
-    if let Ok(pending) = state.messaging.pull(device).await {
-        for env in pending {
-            if !send_frame(&mut sender, ServerMessage::Incoming(env)).await {
-                return; // socket gone
-            }
-        }
+    if !state.deliver_pending(device, &mut sender).await {
+        state.hub.unregister(device).await;
+        return; // socket gone
     }
 
-    // --- 2. Main receive loop. ---------------------------------------------
-    while let Some(frame) = receiver.next().await {
-        let bytes = match frame {
-            Ok(Message::Binary(b)) => b,
-            Ok(Message::Text(t)) => t.into_bytes(),
-            Ok(Message::Close(_)) | Err(_) => break,
-            // Ping/Pong are handled by axum; ignore anything else.
-            Ok(_) => continue,
-        };
-
-        let msg = match ClientMessage::from_bytes(&bytes) {
-            Ok(m) => m,
-            Err(e) => {
-                if !send_frame(&mut sender, ServerMessage::Error { message: e.to_string() }).await {
-                    break;
-                }
-                continue;
-            }
-        };
-
-        match msg {
-            // A second Hello is a no-op (already authenticated); refresh presence.
-            ClientMessage::Hello { .. } => {
-                heartbeat(&state, device).await;
-            }
-
-            ClientMessage::Send(envelope) => {
-                let id = envelope.id;
-                match state.messaging.ingest(envelope).await {
-                    Ok(_) => {
-                        heartbeat(&state, device).await;
-                        if !send_frame(&mut sender, ServerMessage::Ack(id)).await {
+    // --- 2. Main loop: react to client frames AND live-push wake-ups. -------
+    // `replaced` distinguishes "a newer session took over this device" (don't touch the
+    // registry on exit) from a normal disconnect (deregister ourselves).
+    let mut replaced = false;
+    loop {
+        tokio::select! {
+            // Someone sent this device a message: drain and push it immediately.
+            signal = wake.recv() => {
+                match signal {
+                    Some(()) => {
+                        if !state.deliver_pending(device, &mut sender).await {
                             break;
                         }
                     }
+                    // Channel closed: a newer session replaced us. Stop driving this socket.
+                    None => { replaced = true; break; }
+                }
+            }
+
+            // A frame arrived from the client.
+            frame = receiver.next() => {
+                let Some(frame) = frame else { break };
+                let bytes = match frame {
+                    Ok(Message::Binary(b)) => b,
+                    Ok(Message::Text(t)) => t.into_bytes(),
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    Ok(_) => continue,
+                };
+
+                let msg = match ClientMessage::from_bytes(&bytes) {
+                    Ok(m) => m,
                     Err(e) => {
-                        if !send_frame(&mut sender, ServerMessage::Error { message: e.to_string() })
-                            .await
-                        {
+                        if !send_frame(&mut sender, ServerMessage::Error { message: e.to_string() }).await {
                             break;
                         }
+                        continue;
+                    }
+                };
+
+                match msg {
+                    // A second Hello is a no-op (already authenticated); refresh presence.
+                    ClientMessage::Hello { .. } => heartbeat(&state, device).await,
+
+                    ClientMessage::Send(envelope) => {
+                        let id = envelope.id;
+                        let to = envelope.to.clone();
+                        match state.messaging.ingest(envelope).await {
+                            Ok(_) => {
+                                state.notify_recipients(&to).await;
+                                heartbeat(&state, device).await;
+                                if !send_frame(&mut sender, ServerMessage::Ack(id)).await {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                if !send_frame(&mut sender, ServerMessage::Error { message: e.to_string() }).await {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Transport-level ack of a delivered Incoming; the drain already removed it.
+                    ClientMessage::Ack(_) => {}
+
+                    ClientMessage::Presence(_) | ClientMessage::Typing(_) => {
+                        heartbeat(&state, device).await;
                     }
                 }
-            }
-
-            // Transport-level ack of a delivered Incoming; nothing to persist server-side
-            // in this in-memory deployment (drain already removed it).
-            ClientMessage::Ack(_) => {}
-
-            ClientMessage::Presence(_) | ClientMessage::Typing(_) => {
-                heartbeat(&state, device).await;
             }
         }
     }
 
-    // Best-effort: drop the online marker on disconnect by letting the TTL expire — no
-    // explicit offline event is required (absence of heartbeat is the offline signal).
+    // Deregister on disconnect unless a newer session already owns the slot. Online marker
+    // lapses via TTL (no explicit offline event).
+    if !replaced {
+        state.hub.unregister(device).await;
+    }
 }
 
 /// Refresh a device's online heartbeat.

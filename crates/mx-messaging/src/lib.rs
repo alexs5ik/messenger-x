@@ -136,6 +136,13 @@ where
         self.queue.drain(device).await
     }
 
+    /// Public view of [`resolve_devices`](Self::resolve_devices): the set of devices an
+    /// envelope to `to` would be delivered to. Used by the server to signal live sessions
+    /// to pull immediately after an ingest (real-time delivery).
+    pub async fn recipients(&self, to: &Recipient) -> Result<Vec<DeviceId>> {
+        self.resolve_devices(to).await
+    }
+
     /// Resolve a [`Recipient`] into the concrete, de-duplicated set of recipient devices.
     ///
     /// For a group, members are listed and each member's devices are gathered; a user

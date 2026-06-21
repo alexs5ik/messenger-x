@@ -106,28 +106,9 @@ function startApp(): void {
       dot.textContent = s === "online" ? "на связи" : s === "connecting" ? "подключение" : "оффлайн";
     }
   });
+  // The server pushes messages over the WebSocket in real time (queued ones on connect,
+  // live ones via its per-session hub), so the client just listens — no polling.
   socket.connect();
-  // The WS gateway pushes queued messages on connect; until the server gains live
-  // per-session push, we also poll the device queue so messages arriving mid-session are
-  // delivered promptly. Both paths drain the same atomic server queue, so each envelope is
-  // consumed exactly once.
-  void poll();
-  setInterval(poll, 1200);
-  // Dev-only hook so the running app can be driven/inspected deterministically from the
-  // browser console (used for live verification).
-  (window as unknown as { __mx?: unknown }).__mx = { poll, onIncoming, getContacts: () => contacts };
-}
-
-async function poll(): Promise<void> {
-  if (!identity) return;
-  try {
-    const res = await fetch(`/v1/messages/${identity.deviceId}`);
-    if (!res.ok) return;
-    const list = (await res.json()) as WireEnvelope[];
-    for (const env of list) await onIncoming(env);
-  } catch {
-    /* transient — next tick retries */
-  }
 }
 
 function renderApp(): void {
