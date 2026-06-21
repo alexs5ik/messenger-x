@@ -51,8 +51,8 @@ export class Account {
 if (Symbol.dispose) Account.prototype[Symbol.dispose] = Account.prototype.free;
 
 /**
- * The initiator's result: the agreed 32-byte secret and the init message (JSON) to send
- * alongside the first ciphertext so the responder can derive the same secret.
+ * The initiator's result: the seeded Double Ratchet state (to persist) and the init message
+ * (JSON) to send on the first frame so the responder can seed the matching ratchet.
  */
 export class InitSession {
     static __wrap(ptr) {
@@ -72,6 +72,7 @@ export class InitSession {
         wasm.__wbg_initsession_free(ptr, 0);
     }
     /**
+     * PQXDH init message (JSON) to send on the first message.
      * @returns {string}
      */
     get init_json() {
@@ -87,16 +88,59 @@ export class InitSession {
         }
     }
     /**
+     * Serialized [`RatchetState`] to persist for this outbound session.
      * @returns {Uint8Array}
      */
-    get secret() {
-        const ret = wasm.initsession_secret(this.__wbg_ptr);
+    get ratchet() {
+        const ret = wasm.initsession_ratchet(this.__wbg_ptr);
         var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
     }
 }
 if (Symbol.dispose) InitSession.prototype[Symbol.dispose] = InitSession.prototype.free;
+
+/**
+ * Result of a ratchet step: the advanced state to persist plus the produced bytes (ciphertext
+ * frame for encrypt, plaintext for decrypt).
+ */
+export class RatchetStep {
+    static __wrap(ptr) {
+        const obj = Object.create(RatchetStep.prototype);
+        obj.__wbg_ptr = ptr;
+        RatchetStepFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RatchetStepFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_ratchetstep_free(ptr, 0);
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get data() {
+        const ret = wasm.ratchetstep_data(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get state() {
+        const ret = wasm.ratchetstep_state(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+}
+if (Symbol.dispose) RatchetStep.prototype[Symbol.dispose] = RatchetStep.prototype.free;
 
 /**
  * Create a device account for `device_id` (a UUID string): generate identity + pre-keys,
@@ -155,6 +199,42 @@ export function pqxdh_selftest() {
 }
 
 /**
+ * Decrypt one frame, advancing the ratchet. Returns the new state and the plaintext.
+ * @param {Uint8Array} state
+ * @param {Uint8Array} frame
+ * @returns {RatchetStep}
+ */
+export function ratchet_decrypt(state, frame) {
+    const ptr0 = passArray8ToWasm0(state, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(frame, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.ratchet_decrypt(ptr0, len0, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return RatchetStep.__wrap(ret[0]);
+}
+
+/**
+ * Encrypt one message, advancing the ratchet. Returns the new state and the ciphertext frame.
+ * @param {Uint8Array} state
+ * @param {Uint8Array} plaintext
+ * @returns {RatchetStep}
+ */
+export function ratchet_encrypt(state, plaintext) {
+    const ptr0 = passArray8ToWasm0(state, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(plaintext, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.ratchet_encrypt(ptr0, len0, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return RatchetStep.__wrap(ret[0]);
+}
+
+/**
  * Encrypt `plaintext` under a 32-byte (or any-length) `secret`. Output is `nonce(12) || ct`.
  * Uses the same AEAD as mx-crypto's ratchet, so the wire bytes are produced by real Rust
  * crypto compiled to wasm — the server only ever sees this opaque blob.
@@ -177,8 +257,8 @@ export function seal(secret, plaintext) {
 }
 
 /**
- * Initiator side of a real PQXDH session: derive a shared secret against `their_bundle_json`
- * using my own secrets, returning the secret + the init message to transmit.
+ * Initiator side of a real PQXDH session: handshake against `their_bundle_json`, seed a
+ * Double Ratchet, and return the ratchet state + the init message to transmit.
  * @param {Uint8Array} my_secrets
  * @param {string} their_bundle_json
  * @returns {InitSession}
@@ -196,8 +276,8 @@ export function session_initiator(my_secrets, their_bundle_json) {
 }
 
 /**
- * Responder side: derive the same 32-byte secret from the initiator's init message using my
- * stored secrets.
+ * Responder side: handshake from the initiator's init message and seed the matching ratchet.
+ * Returns the serialized ratchet state.
  * @param {Uint8Array} my_secrets
  * @param {string} init_json
  * @returns {Uint8Array}
@@ -342,6 +422,9 @@ const AccountFinalization = (typeof FinalizationRegistry === 'undefined')
 const InitSessionFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_initsession_free(ptr, 1));
+const RatchetStepFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_ratchetstep_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();

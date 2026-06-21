@@ -1,18 +1,21 @@
-// Client-side cryptography for Messenger X — real PQXDH, backed by mx-crypto compiled to wasm.
+// Client-side cryptography for Messenger X — real PQXDH + Double Ratchet, via mx-crypto (wasm).
 //
-// On registration the device creates an account (identity + pre-keys) and publishes its public
-// bundle; the secret blob is kept locally. To message a peer we fetch their bundle from the
-// server's prekey directory and run a real hybrid PQXDH handshake (X25519 + ML-KEM-768) to
-// derive a per-conversation secret, then seal each message with ChaCha20-Poly1305. The server
-// only ever sees opaque ciphertext. Each direction is its own X3DH/PQXDH session (sender =
-// initiator against the recipient's bundle), which avoids handshake glare.
+// On registration the device creates an account and publishes its public bundle. To message a
+// peer we fetch their bundle and run a hybrid PQXDH handshake (X25519 + ML-KEM-768) that seeds
+// a Double Ratchet; every message then advances the ratchet, deriving a fresh one-time key
+// (per-message forward secrecy). The server only ever sees opaque ciphertext.
+//
+// Each direction is its own one-way ratchet (sender = initiator against the recipient's
+// bundle), which avoids handshake glare. Ratchet state is persisted so a live session survives
+// page reloads. Delivery must be in order per direction (the WS FIFO guarantees this); the
+// simplified ratchet does not store skipped-message keys (design doc §7).
 
 import init, {
   account_create,
   session_initiator,
   session_responder,
-  seal,
-  open,
+  ratchet_encrypt,
+  ratchet_decrypt,
   pqxdh_selftest,
 } from "./mxwasm/mx_crypto_wasm.js";
 
@@ -39,6 +42,7 @@ function unb64(s: string): Uint8Array {
 
 const SECRETS_KEY = "mx.secrets";
 const OUT_KEY = "mx.sessions.out";
+const IN_KEY = "mx.sessions.in";
 
 function loadSecrets(): Uint8Array {
   const b = sessionStorage.getItem(SECRETS_KEY);
@@ -46,20 +50,11 @@ function loadSecrets(): Uint8Array {
   return unb64(b);
 }
 
-// Outbound sessions (we are the initiator): peer -> { secret, init }. Persisted so the init we
-// advertise — and thus the secret the peer derived — stays stable across page reloads.
-type OutSession = { secret: string; init: string };
-function loadOut(): Record<string, OutSession> {
-  return JSON.parse(sessionStorage.getItem(OUT_KEY) ?? "{}") as Record<string, OutSession>;
-}
-function saveOut(map: Record<string, OutSession>): void {
-  sessionStorage.setItem(OUT_KEY, JSON.stringify(map));
-}
-
-// Inbound sessions (we are the responder): from -> { init, secret }. In-memory; the sender
-// includes its init on every message, so this is just an optimisation and is re-derived if the
-// peer's init changes (e.g. after the peer re-registers).
-const inbound = new Map<string, { init: string; secret: Uint8Array }>();
+type OutSession = { ratchet: string; init: string; sentInit: boolean };
+type InSession = { ratchet: string };
+const loadMap = <T>(key: string): Record<string, T> =>
+  JSON.parse(sessionStorage.getItem(key) ?? "{}") as Record<string, T>;
+const saveMap = (key: string, m: unknown): void => sessionStorage.setItem(key, JSON.stringify(m));
 
 /// Provision this device: create an account, store the secret blob, return the bundle JSON to
 /// publish. Call once per registration; on reload the existing secrets are reused.
@@ -76,21 +71,26 @@ async function fetchBundle(peer: string): Promise<string> {
   return r.text();
 }
 
-// Encrypt `text` from `me` to `peer` using a real PQXDH-derived secret. The init message is
-// carried on every message so the recipient can derive the same secret.
+// Encrypt `text` from `me` to `peer`, advancing the outbound ratchet. The init message rides on
+// the first message only (the ratchet carries everything afterwards).
 export async function encrypt(me: string, peer: string, text: string): Promise<Uint8Array> {
   await ensureReady();
-  const out = loadOut();
+  const out = loadMap<OutSession>(OUT_KEY);
   let sess = out[peer];
   if (!sess) {
     const bundle = await fetchBundle(peer);
     const established = session_initiator(loadSecrets(), bundle);
-    sess = { secret: b64(established.secret), init: established.init_json };
+    sess = { ratchet: b64(established.ratchet), init: established.init_json, sentInit: false };
     out[peer] = sess;
-    saveOut(out);
   }
-  const sealed = seal(unb64(sess.secret), enc.encode(text));
-  return enc.encode(JSON.stringify({ v: 3, from: me, c: b64(sealed), init: sess.init }));
+  const step = ratchet_encrypt(unb64(sess.ratchet), enc.encode(text));
+  sess.ratchet = b64(step.state);
+  const includeInit = !sess.sentInit;
+  sess.sentInit = true;
+  saveMap(OUT_KEY, out);
+  const env: Record<string, unknown> = { v: 4, from: me, f: b64(step.data) };
+  if (includeInit) env.init = sess.init;
+  return enc.encode(JSON.stringify(env));
 }
 
 export interface Decrypted {
@@ -98,19 +98,22 @@ export interface Decrypted {
   text: string;
 }
 
-// Decrypt a payload addressed to us. Derives (or reuses) the responder secret from the sender's
-// init. Throws on tamper/wrong key (AEAD authentication).
+// Decrypt a payload addressed to us, advancing the inbound ratchet. The first message from a
+// peer carries its init, used to seed our responder ratchet. Throws on tamper/out-of-order.
 export async function decrypt(payload: Uint8Array): Promise<Decrypted> {
   await ensureReady();
-  const obj = JSON.parse(dec.decode(payload)) as { from: string; c: string; init?: string };
-  let cached = inbound.get(obj.from);
-  if (!cached || cached.init !== obj.init) {
-    if (!obj.init) throw new Error("no session and no init message");
-    cached = { init: obj.init, secret: session_responder(loadSecrets(), obj.init) };
-    inbound.set(obj.from, cached);
+  const obj = JSON.parse(dec.decode(payload)) as { from: string; f: string; init?: string };
+  const inMap = loadMap<InSession>(IN_KEY);
+  let sess = inMap[obj.from];
+  if (!sess) {
+    if (!obj.init) throw new Error("no inbound session and no init message");
+    sess = { ratchet: b64(session_responder(loadSecrets(), obj.init)) };
+    inMap[obj.from] = sess;
   }
-  const pt = open(cached.secret, unb64(obj.c));
-  return { from: obj.from, text: dec.decode(pt) };
+  const step = ratchet_decrypt(unb64(sess.ratchet), unb64(obj.f));
+  sess.ratchet = b64(step.state);
+  saveMap(IN_KEY, inMap);
+  return { from: obj.from, text: dec.decode(step.data) };
 }
 
 export interface PqStatus {

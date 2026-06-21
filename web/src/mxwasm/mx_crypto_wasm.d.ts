@@ -20,15 +20,33 @@ export class Account {
 }
 
 /**
- * The initiator's result: the agreed 32-byte secret and the init message (JSON) to send
- * alongside the first ciphertext so the responder can derive the same secret.
+ * The initiator's result: the seeded Double Ratchet state (to persist) and the init message
+ * (JSON) to send on the first frame so the responder can seed the matching ratchet.
  */
 export class InitSession {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * PQXDH init message (JSON) to send on the first message.
+     */
     readonly init_json: string;
-    readonly secret: Uint8Array;
+    /**
+     * Serialized [`RatchetState`] to persist for this outbound session.
+     */
+    readonly ratchet: Uint8Array;
+}
+
+/**
+ * Result of a ratchet step: the advanced state to persist plus the produced bytes (ciphertext
+ * frame for encrypt, plaintext for decrypt).
+ */
+export class RatchetStep {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    readonly data: Uint8Array;
+    readonly state: Uint8Array;
 }
 
 /**
@@ -51,6 +69,16 @@ export function open(secret: Uint8Array, data: Uint8Array): Uint8Array;
 export function pqxdh_selftest(): string;
 
 /**
+ * Decrypt one frame, advancing the ratchet. Returns the new state and the plaintext.
+ */
+export function ratchet_decrypt(state: Uint8Array, frame: Uint8Array): RatchetStep;
+
+/**
+ * Encrypt one message, advancing the ratchet. Returns the new state and the ciphertext frame.
+ */
+export function ratchet_encrypt(state: Uint8Array, plaintext: Uint8Array): RatchetStep;
+
+/**
  * Encrypt `plaintext` under a 32-byte (or any-length) `secret`. Output is `nonce(12) || ct`.
  * Uses the same AEAD as mx-crypto's ratchet, so the wire bytes are produced by real Rust
  * crypto compiled to wasm — the server only ever sees this opaque blob.
@@ -58,14 +86,14 @@ export function pqxdh_selftest(): string;
 export function seal(secret: Uint8Array, plaintext: Uint8Array): Uint8Array;
 
 /**
- * Initiator side of a real PQXDH session: derive a shared secret against `their_bundle_json`
- * using my own secrets, returning the secret + the init message to transmit.
+ * Initiator side of a real PQXDH session: handshake against `their_bundle_json`, seed a
+ * Double Ratchet, and return the ratchet state + the init message to transmit.
  */
 export function session_initiator(my_secrets: Uint8Array, their_bundle_json: string): InitSession;
 
 /**
- * Responder side: derive the same 32-byte secret from the initiator's init message using my
- * stored secrets.
+ * Responder side: handshake from the initiator's init message and seed the matching ratchet.
+ * Returns the serialized ratchet state.
  */
 export function session_responder(my_secrets: Uint8Array, init_json: string): Uint8Array;
 
@@ -75,13 +103,18 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_account_free: (a: number, b: number) => void;
     readonly __wbg_initsession_free: (a: number, b: number) => void;
+    readonly __wbg_ratchetstep_free: (a: number, b: number) => void;
     readonly account_bundle_json: (a: number) => [number, number];
     readonly account_create: (a: number, b: number) => [number, number, number];
     readonly account_secrets: (a: number) => [number, number];
     readonly initsession_init_json: (a: number) => [number, number];
-    readonly initsession_secret: (a: number) => [number, number];
+    readonly initsession_ratchet: (a: number) => [number, number];
     readonly open: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pqxdh_selftest: () => [number, number];
+    readonly ratchet_decrypt: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly ratchet_encrypt: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly ratchetstep_data: (a: number) => [number, number];
+    readonly ratchetstep_state: (a: number) => [number, number];
     readonly seal: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly session_initiator: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly session_responder: (a: number, b: number, c: number, d: number) => [number, number, number, number];

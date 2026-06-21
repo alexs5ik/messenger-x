@@ -243,6 +243,79 @@ impl RatchetState {
         self.recv_n = self.recv_n.wrapping_add(1);
         Ok(pt)
     }
+
+    /// Serialize the full ratchet state to a byte blob so a client can persist a live session
+    /// (across messages and page reloads). Layout: root(32) | dh_self(32) |
+    /// dh_remote_flag(1)[+32] | chain_send_flag(1)[+32] | chain_recv_flag(1)[+32] |
+    /// send_n(4 LE) | recv_n(4 LE).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut o = Vec::with_capacity(140);
+        o.extend_from_slice(&self.root_key);
+        o.extend_from_slice(&self.dh_self.to_bytes());
+        match &self.dh_remote {
+            Some(p) => {
+                o.push(1);
+                o.extend_from_slice(p.as_bytes());
+            }
+            None => o.push(0),
+        }
+        for chain in [&self.chain_send, &self.chain_recv] {
+            match chain {
+                Some(c) => {
+                    o.push(1);
+                    o.extend_from_slice(c);
+                }
+                None => o.push(0),
+            }
+        }
+        o.extend_from_slice(&self.send_n.to_le_bytes());
+        o.extend_from_slice(&self.recv_n.to_le_bytes());
+        o
+    }
+
+    /// Reconstruct a ratchet from [`to_bytes`](Self::to_bytes).
+    pub fn from_bytes(data: &[u8]) -> mx_types::Result<Self> {
+        fn take<'a>(data: &'a [u8], p: &mut usize, n: usize) -> mx_types::Result<&'a [u8]> {
+            let s = data
+                .get(*p..*p + n)
+                .ok_or_else(|| mx_types::Error::Crypto("truncated ratchet state".into()))?;
+            *p += n;
+            Ok(s)
+        }
+        fn arr32(s: &[u8]) -> mx_types::Result<[u8; 32]> {
+            s.try_into()
+                .map_err(|_| mx_types::Error::Crypto("bad 32-byte ratchet field".into()))
+        }
+        let mut p = 0usize;
+        let root_key = arr32(take(data, &mut p, 32)?)?;
+        let dh_self = XStaticSecret::from(arr32(take(data, &mut p, 32)?)?);
+        let dh_remote = if take(data, &mut p, 1)?[0] == 1 {
+            Some(XPublicKey::from(arr32(take(data, &mut p, 32)?)?))
+        } else {
+            None
+        };
+        let chain_send = if take(data, &mut p, 1)?[0] == 1 {
+            Some(arr32(take(data, &mut p, 32)?)?)
+        } else {
+            None
+        };
+        let chain_recv = if take(data, &mut p, 1)?[0] == 1 {
+            Some(arr32(take(data, &mut p, 32)?)?)
+        } else {
+            None
+        };
+        let sn = take(data, &mut p, 4)?;
+        let rn = take(data, &mut p, 4)?;
+        Ok(Self {
+            root_key,
+            dh_self,
+            dh_remote,
+            chain_send,
+            chain_recv,
+            send_n: u32::from_le_bytes([sn[0], sn[1], sn[2], sn[3]]),
+            recv_n: u32::from_le_bytes([rn[0], rn[1], rn[2], rn[3]]),
+        })
+    }
 }
 
 #[cfg(test)]

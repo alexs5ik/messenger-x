@@ -19,6 +19,7 @@ use wasm_bindgen::prelude::*;
 use mx_crypto::identity::{generate_prekey_bundle, IdentityKeyPair, PreKeySecrets};
 use mx_crypto::pqxdh::{initiator_handshake, responder_handshake, PqxdhInitMessage};
 use mx_crypto::ratchet::RatchetState;
+use mx_crypto::session::{initiator_session, responder_session};
 use mx_types::{Ciphertext, DeviceId, PreKeyBundle};
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
 
@@ -61,47 +62,91 @@ pub fn account_create(device_id: &str) -> Result<Account, JsError> {
     })
 }
 
-/// The initiator's result: the agreed 32-byte secret and the init message (JSON) to send
-/// alongside the first ciphertext so the responder can derive the same secret.
+/// The initiator's result: the seeded Double Ratchet state (to persist) and the init message
+/// (JSON) to send on the first frame so the responder can seed the matching ratchet.
 #[wasm_bindgen]
 pub struct InitSession {
-    secret: Vec<u8>,
+    ratchet: Vec<u8>,
     init_json: String,
 }
 
 #[wasm_bindgen]
 impl InitSession {
+    /// Serialized [`RatchetState`] to persist for this outbound session.
     #[wasm_bindgen(getter)]
-    pub fn secret(&self) -> Vec<u8> {
-        self.secret.clone()
+    pub fn ratchet(&self) -> Vec<u8> {
+        self.ratchet.clone()
     }
+    /// PQXDH init message (JSON) to send on the first message.
     #[wasm_bindgen(getter)]
     pub fn init_json(&self) -> String {
         self.init_json.clone()
     }
 }
 
-/// Initiator side of a real PQXDH session: derive a shared secret against `their_bundle_json`
-/// using my own secrets, returning the secret + the init message to transmit.
+/// Result of a ratchet step: the advanced state to persist plus the produced bytes (ciphertext
+/// frame for encrypt, plaintext for decrypt).
+#[wasm_bindgen]
+pub struct RatchetStep {
+    state: Vec<u8>,
+    data: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl RatchetStep {
+    #[wasm_bindgen(getter)]
+    pub fn state(&self) -> Vec<u8> {
+        self.state.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn data(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+}
+
+/// Initiator side of a real PQXDH session: handshake against `their_bundle_json`, seed a
+/// Double Ratchet, and return the ratchet state + the init message to transmit.
 #[wasm_bindgen]
 pub fn session_initiator(my_secrets: &[u8], their_bundle_json: &str) -> Result<InitSession, JsError> {
     let secrets = PreKeySecrets::from_bytes(my_secrets).map_err(js_err)?;
     let their: PreKeyBundle = serde_json::from_str(their_bundle_json).map_err(js_err)?;
-    let hs = initiator_handshake(&secrets.identity, &their).map_err(js_err)?;
+    let (ratchet, init) = initiator_session(&secrets.identity, &their).map_err(js_err)?;
     Ok(InitSession {
-        secret: hs.shared_secret.0.to_vec(),
-        init_json: serde_json::to_string(&hs.init_message).map_err(js_err)?,
+        ratchet: ratchet.to_bytes(),
+        init_json: serde_json::to_string(&init).map_err(js_err)?,
     })
 }
 
-/// Responder side: derive the same 32-byte secret from the initiator's init message using my
-/// stored secrets.
+/// Responder side: handshake from the initiator's init message and seed the matching ratchet.
+/// Returns the serialized ratchet state.
 #[wasm_bindgen]
 pub fn session_responder(my_secrets: &[u8], init_json: &str) -> Result<Vec<u8>, JsError> {
     let secrets = PreKeySecrets::from_bytes(my_secrets).map_err(js_err)?;
     let init: PqxdhInitMessage = serde_json::from_str(init_json).map_err(js_err)?;
-    let ss = responder_handshake(&secrets, &init).map_err(js_err)?;
-    Ok(ss.0.to_vec())
+    let ratchet = responder_session(&secrets, &init).map_err(js_err)?;
+    Ok(ratchet.to_bytes())
+}
+
+/// Encrypt one message, advancing the ratchet. Returns the new state and the ciphertext frame.
+#[wasm_bindgen]
+pub fn ratchet_encrypt(state: &[u8], plaintext: &[u8]) -> Result<RatchetStep, JsError> {
+    let mut rt = RatchetState::from_bytes(state).map_err(js_err)?;
+    let ct = rt.encrypt(plaintext).map_err(js_err)?;
+    Ok(RatchetStep {
+        state: rt.to_bytes(),
+        data: ct.0,
+    })
+}
+
+/// Decrypt one frame, advancing the ratchet. Returns the new state and the plaintext.
+#[wasm_bindgen]
+pub fn ratchet_decrypt(state: &[u8], frame: &[u8]) -> Result<RatchetStep, JsError> {
+    let mut rt = RatchetState::from_bytes(state).map_err(js_err)?;
+    let pt = rt.decrypt(&Ciphertext(frame.to_vec())).map_err(js_err)?;
+    Ok(RatchetStep {
+        state: rt.to_bytes(),
+        data: pt,
+    })
 }
 
 /// Run a complete PQXDH handshake + ratchet exchange and return a JSON status string.

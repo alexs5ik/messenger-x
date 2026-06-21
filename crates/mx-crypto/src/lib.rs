@@ -28,6 +28,7 @@
 pub mod identity;
 pub mod pqxdh;
 pub mod ratchet;
+pub mod session;
 
 pub use identity::{
     generate_prekey_bundle, IdentityKeyPair, KemKeyPair, OneTimePreKey, PreKeySecrets,
