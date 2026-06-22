@@ -27,8 +27,8 @@ interface Msg {
   from?: string; // sender userId — used to label incoming group messages
 }
 
-// Client-side editable profile, persisted in localStorage (survives a tab close, unlike
-// the sessionStorage-backed identity/threads).
+// Client-side editable profile, persisted in localStorage alongside the identity, keys and
+// threads — so a session survives a tab/browser close and stays signed in until explicit logout.
 interface Profile {
   name?: string;
   status?: string;
@@ -54,14 +54,26 @@ type AppMsg =
 
 const LS = { profile: "mx.profile", groups: "mx.groups", admin: "mx.admin" };
 
-// Bump when the shape of any stored data changes so old tabs auto-reset instead of breaking.
-const STORAGE_VERSION = "6";
+// Bump when the shape of any stored data changes so old clients auto-reset instead of breaking.
+// (Bumped to 7 when identity/keys/threads moved from sessionStorage to localStorage for persistence.)
+const STORAGE_VERSION = "7";
 
+// Account data lives in localStorage so a registered session persists across tab/browser closes
+// (was sessionStorage, which evaporated on close and forced a re-registration every time).
 const SS = {
   identity: "mx.identity",
   contacts: "mx.contacts",
   msgs: (peer: string) => `mx.msgs.${peer}`,
 };
+
+// Wipe every account-scoped key (everything under "mx." except the cosmetic theme) — used on
+// logout and on a storage-version bump. Keeping mx.theme preserves the user's chosen theme.
+function clearAccount(): void {
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith("mx.") && k !== "mx.theme") localStorage.removeItem(k);
+  }
+}
 
 let identity: Identity | null = null;
 let contacts: Contact[] = [];
@@ -224,16 +236,16 @@ async function sendApp(peer: string, msg: AppMsg): Promise<void> {
 
 function loadThread(peer: string): Msg[] {
   if (!threads.has(peer)) {
-    const raw = sessionStorage.getItem(SS.msgs(peer));
+    const raw = localStorage.getItem(SS.msgs(peer));
     threads.set(peer, raw ? (JSON.parse(raw) as Msg[]) : []);
   }
   return threads.get(peer)!;
 }
 function saveThread(peer: string): void {
-  sessionStorage.setItem(SS.msgs(peer), JSON.stringify(threads.get(peer) ?? []));
+  localStorage.setItem(SS.msgs(peer), JSON.stringify(threads.get(peer) ?? []));
 }
 function saveContacts(): void {
-  sessionStorage.setItem(SS.contacts, JSON.stringify(contacts));
+  localStorage.setItem(SS.contacts, JSON.stringify(contacts));
 }
 function ensureContact(userId: string, name?: string): void {
   if (!contacts.some((c) => c.userId === userId)) {
@@ -306,16 +318,16 @@ export function mount(): void {
   // Self-heal: if stored data is from an older client (different format) or the device was
   // never provisioned with crypto secrets, wipe and start fresh so nothing silently breaks.
   const stale =
-    sessionStorage.getItem("mx.ver") !== STORAGE_VERSION ||
-    (sessionStorage.getItem(SS.identity) && !sessionStorage.getItem("mx.secrets"));
+    localStorage.getItem("mx.ver") !== STORAGE_VERSION ||
+    (localStorage.getItem(SS.identity) && !localStorage.getItem("mx.secrets"));
   if (stale) {
-    sessionStorage.clear();
-    sessionStorage.setItem("mx.ver", STORAGE_VERSION);
+    clearAccount();
+    localStorage.setItem("mx.ver", STORAGE_VERSION);
   }
-  const rawId = sessionStorage.getItem(SS.identity);
+  const rawId = localStorage.getItem(SS.identity);
   if (rawId) {
     identity = JSON.parse(rawId) as Identity;
-    contacts = JSON.parse(sessionStorage.getItem(SS.contacts) ?? "[]") as Contact[];
+    contacts = JSON.parse(localStorage.getItem(SS.contacts) ?? "[]") as Contact[];
     startApp();
   } else {
     renderLogin();
@@ -385,7 +397,8 @@ function renderLogin(): void {
       $("#loginhint").textContent = "Генерация ключей (PQXDH)…";
       const bundle = await provisionAccount(identity.deviceId);
       await publishPrekeys(bundle);
-      sessionStorage.setItem(SS.identity, JSON.stringify(identity));
+      localStorage.setItem(SS.identity, JSON.stringify(identity));
+      localStorage.setItem("mx.ver", STORAGE_VERSION);
       startApp();
     } catch (e) {
       $("#loginhint").textContent =
@@ -519,12 +532,9 @@ function renderApp(): void {
 // ---------- Logout (shared by rail button and profile footer) ----------
 function doLogout(): void {
   socket?.close();
-  sessionStorage.clear();
-  // Reset device-bound profile & groups so the next account starts clean (keep theme).
-  localStorage.removeItem(LS.profile);
-  localStorage.removeItem(LS.groups);
-  localStorage.removeItem(LS.admin);
-  localStorage.removeItem(LS_GPIN);
+  // Clear everything account-scoped (identity, keys, contacts, threads, profile, groups, …) so the
+  // next account starts clean; the theme is intentionally preserved.
+  clearAccount();
   location.reload();
 }
 

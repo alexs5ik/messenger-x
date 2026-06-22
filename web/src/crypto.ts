@@ -45,7 +45,7 @@ const OUT_KEY = "mx.sessions.out";
 const IN_KEY = "mx.sessions.in";
 
 function loadSecrets(): Uint8Array {
-  const b = sessionStorage.getItem(SECRETS_KEY);
+  const b = localStorage.getItem(SECRETS_KEY);
   if (!b) throw new Error("device not provisioned (no secrets)");
   return unb64(b);
 }
@@ -53,15 +53,15 @@ function loadSecrets(): Uint8Array {
 type OutSession = { ratchet: string; init: string; sentInit: boolean };
 type InSession = { ratchet: string };
 const loadMap = <T>(key: string): Record<string, T> =>
-  JSON.parse(sessionStorage.getItem(key) ?? "{}") as Record<string, T>;
-const saveMap = (key: string, m: unknown): void => sessionStorage.setItem(key, JSON.stringify(m));
+  JSON.parse(localStorage.getItem(key) ?? "{}") as Record<string, T>;
+const saveMap = (key: string, m: unknown): void => localStorage.setItem(key, JSON.stringify(m));
 
 /// Provision this device: create an account, store the secret blob, return the bundle JSON to
 /// publish. Call once per registration; on reload the existing secrets are reused.
 export async function provisionAccount(deviceId: string): Promise<string> {
   await ensureReady();
   const acc = account_create(deviceId);
-  sessionStorage.setItem(SECRETS_KEY, b64(acc.secrets));
+  localStorage.setItem(SECRETS_KEY, b64(acc.secrets));
   return acc.bundle_json;
 }
 
