@@ -1,3 +1,12 @@
+# Render Blueprint: the web service + a managed Postgres database.
+# The server persists its state snapshot to Postgres (via DATABASE_URL) so accounts, passwords
+# and chats survive restarts/redeploys — unlike the ephemeral /tmp file on the free web tier.
+databases:
+  - name: messenger-x-db
+    plan: free          # NOTE: Render's free Postgres is removed after ~30 days; upgrade for permanence.
+    databaseName: messengerx
+    user: messengerx
+
 services:
   - type: web
     name: messenger-x
@@ -6,9 +15,15 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
+      # Durable storage: the connection string is injected from the database above.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: messenger-x-db
+          property: connectionString
       - key: MX_TOKEN_SECRET
         generateValue: true
       - key: MX_ADMIN_TOKEN
         sync: false
+      # Fallback snapshot path used only if DATABASE_URL is unset (kept for local/dev parity).
       - key: MX_DATA_FILE
         value: /tmp/state.json

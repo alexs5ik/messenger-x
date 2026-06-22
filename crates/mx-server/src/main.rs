@@ -40,6 +40,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -211,26 +212,16 @@ impl AppState {
         }
     }
 
-    /// Load durable state from a snapshot file (if present) into the stores.
-    async fn load_snapshot(&self, path: &std::path::Path) {
-        match mx_storage::persist::Snapshot::load(path) {
-            Ok(Some(snap)) => {
-                let users = snap.users.len();
-                snap.apply(&self.users, &self.prekeys, &self.groups).await;
-                tracing::info!(users, ?path, "restored state snapshot");
-            }
-            Ok(None) => tracing::info!(?path, "no snapshot yet; starting empty"),
-            Err(e) => tracing::warn!(error = %e, ?path, "failed to read snapshot; starting empty"),
-        }
+    /// Hydrate the in-memory stores from a previously persisted snapshot.
+    async fn apply_snapshot(&self, snap: mx_storage::persist::Snapshot) {
+        let users = snap.users.len();
+        snap.apply(&self.users, &self.prekeys, &self.groups).await;
+        tracing::info!(users, "restored state snapshot");
     }
 
-    /// Write the current durable state to the snapshot file.
-    async fn save_snapshot(&self, path: &std::path::Path) {
-        let snap =
-            mx_storage::persist::Snapshot::capture(&self.users, &self.prekeys, &self.groups).await;
-        if let Err(e) = snap.save(path) {
-            tracing::warn!(error = %e, ?path, "failed to write snapshot");
-        }
+    /// Capture the current durable state for persistence.
+    async fn capture_snapshot(&self) -> mx_storage::persist::Snapshot {
+        mx_storage::persist::Snapshot::capture(&self.users, &self.prekeys, &self.groups).await
     }
 
     /// Deliver any pending envelopes for `device` over the socket. Returns `false` if the
@@ -1152,6 +1143,114 @@ fn app(state: AppState) -> Router {
     router.with_state(state)
 }
 
+// ===========================================================================
+// Durable snapshot persistence (Postgres or local file)
+// ===========================================================================
+
+/// Where the periodic state snapshot is persisted so a restart/redeploy is non-destructive.
+///
+/// The in-memory stores stay the runtime source of truth; this layer just durably stores and
+/// restores a full [`Snapshot`]. Postgres is used when `DATABASE_URL` is set (survives restarts on
+/// any host, including Render's free tier where the local disk is ephemeral); otherwise a local
+/// JSON file (good for dev). The snapshot is a single JSONB blob — durable and admin-visible —
+/// which can be migrated to normalized tables later without changing callers.
+enum Persistence {
+    File(PathBuf),
+    Postgres(sqlx::PgPool),
+}
+
+impl Persistence {
+    /// Pick the backend: Postgres if `DATABASE_URL` is set and reachable, else a JSON file at
+    /// `MX_DATA_FILE` (default `data/state.json`).
+    async fn init() -> Self {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            match Self::connect_pg(&url).await {
+                Ok(pool) => {
+                    tracing::info!("durable snapshot: Postgres (DATABASE_URL)");
+                    return Persistence::Postgres(pool);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Postgres connect failed; falling back to file")
+                }
+            }
+        }
+        let path = PathBuf::from(
+            std::env::var("MX_DATA_FILE").unwrap_or_else(|_| "data/state.json".to_string()),
+        );
+        tracing::info!(?path, "durable snapshot: local file");
+        Persistence::File(path)
+    }
+
+    /// Open a connection pool and ensure the single-row snapshot table exists.
+    async fn connect_pg(url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(url)
+            .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS app_snapshot (\
+                id INT PRIMARY KEY, \
+                data JSONB NOT NULL, \
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        )
+        .execute(&pool)
+        .await?;
+        Ok(pool)
+    }
+
+    /// Load the persisted snapshot, if any.
+    async fn load(&self) -> Option<mx_storage::persist::Snapshot> {
+        match self {
+            Persistence::File(path) => match mx_storage::persist::Snapshot::load(path) {
+                Ok(snap) => snap,
+                Err(e) => {
+                    tracing::warn!(error = %e, "snapshot file read failed; starting empty");
+                    None
+                }
+            },
+            Persistence::Postgres(pool) => {
+                let row: Result<Option<(serde_json::Value,)>, _> =
+                    sqlx::query_as("SELECT data FROM app_snapshot WHERE id = 1")
+                        .fetch_optional(pool)
+                        .await;
+                match row {
+                    Ok(Some((v,))) => serde_json::from_value(v).ok(),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "snapshot db read failed; starting empty");
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// Persist the given snapshot (best-effort; logs on failure).
+    async fn save(&self, snap: &mx_storage::persist::Snapshot) {
+        match self {
+            Persistence::File(path) => {
+                if let Err(e) = snap.save(path) {
+                    tracing::warn!(error = %e, "snapshot file write failed");
+                }
+            }
+            Persistence::Postgres(pool) => match serde_json::to_value(snap) {
+                Ok(v) => {
+                    let q = sqlx::query(
+                        "INSERT INTO app_snapshot (id, data) VALUES (1, $1) \
+                         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()",
+                    )
+                    .bind(v);
+                    if let Err(e) = q.execute(pool).await {
+                        tracing::warn!(error = %e, "snapshot db write failed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "snapshot serialize failed"),
+            },
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Load a local .env if present (optional; ignored if missing).
@@ -1182,25 +1281,28 @@ async fn main() {
 
     let state = AppState::new(token_secret);
 
-    // Durable state: load a snapshot on boot and persist periodically so a restart does not
-    // wipe accounts (clients hold long-lived tokens). Path is overridable via MX_DATA_FILE.
-    let snapshot_path = std::path::PathBuf::from(
-        std::env::var("MX_DATA_FILE").unwrap_or_else(|_| "data/state.json".to_string()),
-    );
-    state.load_snapshot(&snapshot_path).await;
+    // Durable state: load a snapshot on boot and persist periodically so a restart/redeploy does
+    // not wipe accounts (clients hold long-lived tokens). Backend = Postgres (DATABASE_URL) or a
+    // local JSON file (MX_DATA_FILE).
+    let persistence = Arc::new(Persistence::init().await);
+    match persistence.load().await {
+        Some(snap) => state.apply_snapshot(snap).await,
+        None => tracing::info!("no snapshot yet; starting empty"),
+    }
     {
         let saver = state.clone();
-        let path = snapshot_path.clone();
+        let store = persistence.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(3));
             loop {
                 tick.tick().await;
-                saver.save_snapshot(&path).await;
+                store.save(&saver.capture_snapshot().await).await;
             }
         });
     }
 
     let shutdown_state = state.clone();
+    let shutdown_store = persistence.clone();
     let router = app(state);
 
     let addr: SocketAddr = bind_addr
@@ -1218,7 +1320,9 @@ async fn main() {
         .expect("server error");
 
     // Final flush so a clean shutdown loses nothing since the last periodic save.
-    shutdown_state.save_snapshot(&snapshot_path).await;
+    shutdown_store
+        .save(&shutdown_state.capture_snapshot().await)
+        .await;
     tracing::info!("state snapshot saved on shutdown");
 }
 

@@ -31,6 +31,12 @@ dotenvy = "0.15"
 tower-http = { version = "0.5", features = ["fs"] }
 argon2 = "0.5"
 rand = "0.8"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "postgres",
+    "json",
+] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
