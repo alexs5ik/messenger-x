@@ -1,0 +1,8 @@
+target
+mx_target
+**/node_modules
+web/dist
+web/src/mxwasm
+data
+.git
+**/*.log

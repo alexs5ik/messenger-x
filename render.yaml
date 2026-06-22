@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: messenger-x
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: MX_TOKEN_SECRET
+        generateValue: true
+      - key: MX_ADMIN_TOKEN
+        sync: false
+      - key: MX_DATA_FILE
+        value: /tmp/state.json

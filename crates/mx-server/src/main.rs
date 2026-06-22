@@ -61,6 +61,7 @@ use futures_util::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tower_http::services::{ServeDir, ServeFile};
 
 use mx_ai::AiOrchestrator;
 use mx_auth::AuthService;
@@ -801,7 +802,7 @@ async fn send_frame(sender: &mut WsSink, msg: ServerMessage) -> bool {
 /// Factored out so integration tests can drive it via `tower::ServiceExt::oneshot`
 /// without binding a real socket.
 fn app(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/v1/register", post(register))
         .route("/v1/prekeys", post(publish_prekeys))
@@ -814,8 +815,26 @@ fn app(state: AppState) -> Router {
         .route("/v1/admin/broadcast", post(admin_broadcast))
         .route("/v1/admin/users/:id/delete", post(admin_delete_user))
         .route("/v1/admin/maintenance", post(admin_maintenance))
-        .route("/v1/ws", get(ws_handler))
-        .with_state(state)
+        .route("/v1/ws", get(ws_handler));
+
+    // Serve the built web frontend from the same origin (no CORS) when present.
+    // MX_WEB_DIR defaults to "web/dist"; if the directory is absent (typical local
+    // API-only dev), the fallback is skipped and behavior is unchanged. SPA routing:
+    // unknown paths fall back to index.html so client-side routes resolve. The
+    // explicit routes above always take priority over this fallback_service.
+    let web_dir = std::path::PathBuf::from(
+        std::env::var("MX_WEB_DIR").unwrap_or_else(|_| "web/dist".to_string()),
+    );
+    if web_dir.is_dir() {
+        let index = web_dir.join("index.html");
+        let serve = ServeDir::new(&web_dir).not_found_service(ServeFile::new(index));
+        router = router.fallback_service(serve);
+        tracing::info!(dir = ?web_dir, "serving static frontend (SPA fallback)");
+    } else {
+        tracing::info!(dir = ?web_dir, "no static frontend dir; API-only mode");
+    }
+
+    router.with_state(state)
 }
 
 #[tokio::main]
@@ -831,8 +850,14 @@ async fn main() {
         )
         .init();
 
-    let bind_addr =
-        std::env::var("MX_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:9990".to_string());
+    let bind_addr = std::env::var("MX_BIND_ADDR").unwrap_or_else(|_| {
+        // Render (and most PaaS) inject PORT; bind all interfaces so the platform
+        // can route to us. Locally, with neither var set, keep the dev default.
+        match std::env::var("PORT") {
+            Ok(port) => format!("0.0.0.0:{port}"),
+            Err(_) => "127.0.0.1:9990".to_string(),
+        }
+    });
     let token_secret = std::env::var("MX_TOKEN_SECRET").unwrap_or_else(|_| {
         tracing::warn!(
             "MX_TOKEN_SECRET not set; using a development default — DO NOT use in production"
