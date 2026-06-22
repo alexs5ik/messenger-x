@@ -1446,14 +1446,15 @@ function renderMain(): void {
   }
   const grp = findGroup(active);
   if (grp) {
+    const admin = isGroupAdmin(grp);
     main.innerHTML = `
     <div class="chat-hd">
-      <div class="avatar sm mx-grp-av"><i class="ti ${KIND_ICON[grp.kind]}"></i></div>
-      <div class="chat-hd-info">
+      <div class="avatar sm mx-grp-av${admin ? " mx-hd-open" : ""}"${admin ? ' role="button" tabindex="0" aria-label="Управление" title="Управление"' : ""}><i class="ti ${KIND_ICON[grp.kind]}"></i></div>
+      <div class="chat-hd-info${admin ? " mx-hd-open" : ""}"${admin ? ' role="button" tabindex="0" aria-label="Управление" title="Открыть управление"' : ""}>
         <div class="chat-name">${esc(grp.name)}</div>
         <div class="chat-sub"><i class="ti ti-lock"></i> ${KIND_LABEL[grp.kind]} · ${grp.members.length} участн. · E2E pairwise</div>
       </div>
-      ${isGroupAdmin(grp) ? `<button id="grpManage" class="icon" title="Управление" aria-label="Управление группой"><i class="ti ti-settings"></i></button>` : ""}
+      ${admin ? `<button id="grpManage" class="icon" title="Управление" aria-label="Управление группой"><i class="ti ti-settings"></i></button>` : ""}
     </div>
     <div id="feed" class="feed"></div>
     <div class="inbar">
@@ -1469,6 +1470,20 @@ function renderMain(): void {
       if ((e as KeyboardEvent).key === "Enter") gsend();
     });
     $("#grpManage")?.addEventListener("click", () => openGroupAdmin(grp.id));
+    // Clicking the group icon or title in the header also opens the management panel.
+    if (admin) {
+      const openMgmt = () => openGroupAdmin(grp.id);
+      main.querySelectorAll(".chat-hd .mx-hd-open").forEach((el) => {
+        el.addEventListener("click", openMgmt);
+        el.addEventListener("keydown", (e) => {
+          const k = (e as KeyboardEvent).key;
+          if (k === "Enter" || k === " ") {
+            e.preventDefault();
+            openMgmt();
+          }
+        });
+      });
+    }
     // If the panel is docked, keep the layout shifted after a re-render.
     if (isGroupPinned() && isGroupAdmin(grp)) applyGroupPinLayout(true);
     return;
