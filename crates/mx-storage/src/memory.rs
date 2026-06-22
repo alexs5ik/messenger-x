@@ -57,6 +57,44 @@ impl InMemoryUserStore {
         }
     }
 
+    /// Find a user by email (exact match). Used by password login / reset.
+    pub async fn find_by_email(&self, email: &str) -> Option<User> {
+        let st = self.inner.read().await;
+        st.users
+            .values()
+            .find(|u| u.email.as_deref() == Some(email))
+            .cloned()
+    }
+
+    /// Find a user by phone (exact match).
+    pub async fn find_by_phone(&self, phone: &str) -> Option<User> {
+        let st = self.inner.read().await;
+        st.users
+            .values()
+            .find(|u| u.phone.as_deref() == Some(phone))
+            .cloned()
+    }
+
+    /// Find a user by username (exact match).
+    pub async fn find_by_username(&self, username: &str) -> Option<User> {
+        let st = self.inner.read().await;
+        st.users.values().find(|u| u.username == username).cloned()
+    }
+
+    /// Set (or clear) a user's password hash and the must-change flag. Returns `false` if the
+    /// user does not exist.
+    pub async fn set_password(&self, id: UserId, hash: Option<String>, must_change: bool) -> bool {
+        let mut st = self.inner.write().await;
+        match st.users.get_mut(&id) {
+            Some(u) => {
+                u.password_hash = hash;
+                u.must_change_password = must_change;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Remove a user and all its devices; returns the removed device ids.
     pub async fn delete_user(&self, id: UserId) -> Vec<DeviceId> {
         let mut st = self.inner.write().await;

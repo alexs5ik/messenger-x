@@ -28,28 +28,17 @@ function randomBytes(n: number): number[] {
   return Array.from(crypto.getRandomValues(new Uint8Array(n)));
 }
 
-// Register a new account + first device and obtain a session token. The chosen identifier
-// (email / phone / name) is sent in its matching field; the server requires >=1 of them.
-export async function register(
-  value: string,
-  method: RegisterMethod = "name",
-): Promise<Identity> {
-  const body: Record<string, unknown> = {
-    // Placeholder identity key — the real client publishes its mx-crypto public key here.
-    identity_key: { algo: "x25519", bytes: randomBytes(32) },
-  };
-  if (method === "email") body.email = value;
-  else if (method === "phone") body.phone = value;
-  else body.username = value;
+// The placeholder device identity key. The real long-term key is published separately via the
+// prekey bundle; this field just satisfies the registration contract.
+function deviceKey(): Record<string, unknown> {
+  return { algo: "x25519", bytes: randomBytes(32) };
+}
 
-  const res = await fetch("/v1/register", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`register failed: ${res.status} ${await res.text()}`);
-  const j = (await res.json()) as { user_id: string; device_id: string; token: string };
-  // Display handle = whatever the user typed (email/phone/name) — that's what they recognize.
+function identityFrom(
+  j: { user_id: string; device_id: string; token: string; must_change?: boolean },
+  value: string,
+  method: RegisterMethod,
+): Identity & { mustChange?: boolean } {
   return {
     userId: j.user_id,
     deviceId: j.device_id,
@@ -57,7 +46,108 @@ export async function register(
     username: value,
     method,
     contact: method === "name" ? undefined : value,
+    mustChange: j.must_change,
   };
+}
+
+// Register a new account + first device and obtain a session token. Email/phone registration
+// requires a password (enforced server-side too); the "name" demo path stays passwordless.
+export async function register(
+  value: string,
+  method: RegisterMethod = "name",
+  password?: string,
+): Promise<Identity> {
+  const body: Record<string, unknown> = { identity_key: deviceKey() };
+  if (method === "email") body.email = value;
+  else if (method === "phone") body.phone = value;
+  else body.username = value;
+  if (password) body.password = password;
+
+  const res = await fetch("/v1/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await errText(res, "register"));
+  const j = (await res.json()) as { user_id: string; device_id: string; token: string };
+  return identityFrom(j, value, method);
+}
+
+// Log into an existing account by identifier + password; opens a fresh device session. The
+// returned identity carries `mustChange` when the password was a server-issued temporary one.
+export async function login(
+  value: string,
+  method: RegisterMethod,
+  password: string,
+): Promise<Identity & { mustChange?: boolean }> {
+  const body: Record<string, unknown> = { identity_key: deviceKey(), password };
+  if (method === "email") body.email = value;
+  else if (method === "phone") body.phone = value;
+  else body.username = value;
+
+  const res = await fetch("/v1/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new Error("Неверный логин или пароль");
+  if (!res.ok) throw new Error(await errText(res, "login"));
+  const j = (await res.json()) as {
+    user_id: string;
+    device_id: string;
+    token: string;
+    must_change?: boolean;
+  };
+  return identityFrom(j, value, method);
+}
+
+// Start a password reset. Email → returns a one-time reset token (demo: shown in the UI).
+// Phone → returns a generated temporary password (demo: shown in the UI).
+export async function forgotPassword(
+  value: string,
+  method: "email" | "phone",
+): Promise<{ channel: string; reset_token?: string; temp_password?: string }> {
+  const body: Record<string, unknown> = { method };
+  if (method === "email") body.email = value;
+  else body.phone = value;
+  const res = await fetch("/v1/auth/forgot", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await errText(res, "forgot"));
+  return (await res.json()) as { channel: string; reset_token?: string; temp_password?: string };
+}
+
+// Complete an email reset with the token + a new (policy-compliant) password.
+export async function resetPassword(token: string, password: string): Promise<void> {
+  const res = await fetch("/v1/auth/reset", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token, password }),
+  });
+  if (!res.ok) throw new Error(await errText(res, "reset"));
+}
+
+// Set a new password for the authenticated session (forced change after an SMS temp password).
+export async function changePassword(token: string, password: string): Promise<void> {
+  const res = await fetch("/v1/auth/change", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) throw new Error(await errText(res, "change"));
+}
+
+// Pull the server's `{"error": "..."}` message out of a failed response for a friendlier alert.
+async function errText(res: Response, what: string): Promise<string> {
+  try {
+    const j = (await res.json()) as { error?: string };
+    if (j.error) return j.error;
+  } catch {
+    /* non-JSON body */
+  }
+  return `${what} failed: ${res.status}`;
 }
 
 // Admin REST helper: attaches the x-admin-token header and normalizes 401 / 204.

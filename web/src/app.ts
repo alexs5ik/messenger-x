@@ -3,6 +3,10 @@
 
 import {
   register,
+  login,
+  forgotPassword,
+  resetPassword,
+  changePassword,
   publishPrekeys,
   adminFetch,
   MxSocket,
@@ -516,105 +520,227 @@ export function mount(): void {
 }
 
 // ---------- Login ----------
+// Password policy mirrored from the server: ≥8 chars and ≥1 special (non-alphanumeric) symbol.
+const PW_HINT = "Минимум 8 символов и хотя бы один спецсимвол (!@#$…).";
+function pwPolicyError(pw: string): string | null {
+  if (pw.length < 8) return "Пароль должен быть не короче 8 символов";
+  if (!/[^A-Za-z0-9]/.test(pw)) return "Добавьте хотя бы один спецсимвол";
+  return null;
+}
+function loginPlaceholder(method: RegisterMethod): string {
+  return method === "email" ? "you@example.com" : method === "phone" ? "+7 900 000-00-00" : "Ваше имя";
+}
+// Wrap login-screen content in the branded card.
+function loginShell(inner: string): string {
+  return `<div class="login"><div class="login-card">
+    <div class="brand"><i class="ti ti-shield-lock"></i> Messenger&nbsp;X</div>
+    ${inner}
+  </div></div>`;
+}
+// Finalize a successful auth: provision PQXDH keys, publish the bundle, persist, open the app.
+async function applyIdentityAndStart(id: Identity): Promise<void> {
+  identity = id;
+  const bundle = await provisionAccount(id.deviceId);
+  await publishPrekeys(bundle);
+  localStorage.setItem(SS.identity, JSON.stringify(id));
+  localStorage.setItem("mx.ver", STORAGE_VERSION);
+  startApp();
+}
+
 function renderLogin(): void {
-  root().innerHTML = `
-    <div class="login">
-      <div class="login-card">
-        <div class="brand"><i class="ti ti-shield-lock"></i> Messenger&nbsp;X</div>
-        <p class="muted">Защищённый супер-мессенджер · демо-клиент</p>
-        <div class="login-methods" role="tablist">
-          <button class="login-method is-active" data-method="email"><i class="ti ti-mail"></i> Email</button>
-          <button class="login-method" data-method="phone"><i class="ti ti-phone"></i> Телефон</button>
-          <button class="login-method" data-method="name"><i class="ti ti-user"></i> Имя</button>
-        </div>
-        <input id="uname" type="email" placeholder="you@example.com" autocomplete="off" />
-        <div id="otpStep" class="login-otp" hidden>
-          <p class="hint" id="otpInfo"></p>
-          <input id="otpCode" inputmode="numeric" maxlength="6" placeholder="6-значный код" autocomplete="off" />
-        </div>
-        <button id="go" class="primary"><i class="ti ti-arrow-right"></i> Продолжить</button>
-        <p class="hint" id="loginhint">Откройте вторую вкладку и создайте второго пользователя, чтобы переписываться.</p>
-      </div>
-    </div>`;
-
   let method: RegisterMethod = "email";
-  let demoCode: string | null = null;
-  const input = $("#uname") as HTMLInputElement;
-  const otpStep = $("#otpStep");
-  const otpInfo = $("#otpInfo");
-  const otpCode = $("#otpCode") as HTMLInputElement;
-  const go = $("#go") as HTMLButtonElement;
-  input.focus();
+  let mode: "login" | "register" = "login";
 
-  // Method switch updates the input type/placeholder and resets the demo-OTP step.
-  root()
-    .querySelectorAll<HTMLElement>(".login-method")
-    .forEach((btn) =>
-      btn.addEventListener("click", () => {
-        root().querySelectorAll(".login-method").forEach((b) => b.classList.remove("is-active"));
-        btn.classList.add("is-active");
-        method = btn.dataset.method as RegisterMethod;
-        input.type = method === "email" ? "email" : method === "phone" ? "tel" : "text";
-        input.placeholder =
-          method === "email"
-            ? "you@example.com"
-            : method === "phone"
-              ? "+7 900 000-00-00"
-              : "Ваше имя";
-        input.value = "";
-        otpStep.hidden = true;
-        demoCode = null;
-        go.innerHTML = `<i class="ti ti-arrow-right"></i> Продолжить`;
-        input.focus();
-      }),
-    );
+  const draw = () => {
+    const isName = method === "name";
+    root().innerHTML = loginShell(`
+      <p class="muted">Защищённый супер-мессенджер · демо-клиент</p>
+      <div class="login-methods" role="tablist">
+        <button class="login-method ${method === "email" ? "is-active" : ""}" data-method="email"><i class="ti ti-mail"></i> Email</button>
+        <button class="login-method ${method === "phone" ? "is-active" : ""}" data-method="phone"><i class="ti ti-phone"></i> Телефон</button>
+        <button class="login-method ${method === "name" ? "is-active" : ""}" data-method="name"><i class="ti ti-user"></i> Имя</button>
+      </div>
+      ${
+        isName
+          ? ""
+          : `<div class="login-tabs">
+        <button class="login-tab ${mode === "login" ? "is-active" : ""}" data-mode="login">Вход</button>
+        <button class="login-tab ${mode === "register" ? "is-active" : ""}" data-mode="register">Регистрация</button>
+      </div>`
+      }
+      <input id="uname" type="${method === "email" ? "email" : method === "phone" ? "tel" : "text"}" placeholder="${loginPlaceholder(method)}" autocomplete="off" />
+      ${isName ? "" : `<input id="pw" type="password" placeholder="Пароль" autocomplete="${mode === "register" ? "new-password" : "current-password"}" />`}
+      ${!isName && mode === "register" ? `<p class="hint pw-hint">${PW_HINT}</p>` : ""}
+      <button id="go" class="primary"><i class="ti ti-arrow-right"></i> ${isName ? "Продолжить" : mode === "login" ? "Войти" : "Зарегистрироваться"}</button>
+      ${!isName && mode === "login" ? `<button id="forgot" class="login-link" type="button">Забыли пароль?</button>` : ""}
+      <p class="hint" id="loginhint">${isName ? "Демо-режим: вход по имени без пароля." : "Откройте вторую вкладку и создайте второго пользователя, чтобы переписываться."}</p>
+    `);
 
-  const doRegister = async () => {
-    $("#loginhint").textContent = "Регистрация…";
-    try {
-      identity = await register(input.value.trim(), method);
-      // Provision the device's PQXDH account and publish its pre-key bundle so peers can
-      // start encrypted sessions against it.
-      $("#loginhint").textContent = "Генерация ключей (PQXDH)…";
-      const bundle = await provisionAccount(identity.deviceId);
-      await publishPrekeys(bundle);
-      localStorage.setItem(SS.identity, JSON.stringify(identity));
-      localStorage.setItem("mx.ver", STORAGE_VERSION);
-      startApp();
-    } catch (e) {
-      $("#loginhint").textContent =
-        "Ошибка: запущен ли mx-server на :9990? " + (e as Error).message;
-    }
+    root()
+      .querySelectorAll<HTMLElement>(".login-method")
+      .forEach((b) => b.addEventListener("click", () => ((method = b.dataset.method as RegisterMethod), draw())));
+    root()
+      .querySelectorAll<HTMLElement>(".login-tab")
+      .forEach((b) => b.addEventListener("click", () => ((mode = b.dataset.mode as "login" | "register"), draw())));
+
+    const input = $("#uname") as HTMLInputElement;
+    const pw = document.querySelector("#pw") as HTMLInputElement | null;
+    const hint = $("#loginhint");
+    input.focus();
+
+    const submit = async () => {
+      const val = input.value.trim();
+      if (!val) return;
+      try {
+        if (isName) {
+          hint.textContent = "Регистрация…";
+          await applyIdentityAndStart(await register(val, "name"));
+          return;
+        }
+        const pass = pw!.value;
+        if (mode === "register") {
+          const err = pwPolicyError(pass);
+          if (err) return void (hint.textContent = err);
+          hint.textContent = "Регистрация…";
+          await applyIdentityAndStart(await register(val, method, pass));
+        } else {
+          if (!pass) return void (hint.textContent = "Введите пароль");
+          hint.textContent = "Вход…";
+          const id = await login(val, method, pass);
+          if (id.mustChange) return renderChangeForm(id);
+          await applyIdentityAndStart(id);
+        }
+      } catch (e) {
+        hint.textContent = (e as Error).message;
+      }
+    };
+
+    $("#go").addEventListener("click", submit);
+    input.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") submit();
+    });
+    pw?.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") submit();
+    });
+    document
+      .querySelector("#forgot")
+      ?.addEventListener("click", () => renderForgot(method === "phone" ? "phone" : "email"));
   };
+  draw();
+}
 
-  const submit = async () => {
-    const val = input.value.trim();
+// "Forgot password" entry: ask for the email/phone, then start the matching reset flow.
+function renderForgot(method: "email" | "phone"): void {
+  root().innerHTML = loginShell(`
+    <p class="muted">Сброс пароля по ${method === "email" ? "email" : "телефону"}</p>
+    <input id="fid" type="${method === "email" ? "email" : "tel"}" placeholder="${loginPlaceholder(method)}" autocomplete="off" />
+    <button id="fgo" class="primary"><i class="ti ti-send"></i> ${method === "email" ? "Прислать ссылку" : "Прислать SMS"}</button>
+    <button id="fback" class="login-link" type="button">← Назад ко входу</button>
+    <p class="hint" id="fhint"></p>
+  `);
+  const fid = $("#fid") as HTMLInputElement;
+  const hint = $("#fhint");
+  fid.focus();
+  $("#fback").addEventListener("click", renderLogin);
+  const go = async () => {
+    const val = fid.value.trim();
     if (!val) return;
-    // Name registers directly; email/phone pass through a local DEMO 6-digit code first.
-    if (method === "name") return doRegister();
-    if (!demoCode) {
-      demoCode = String(Math.floor(100000 + Math.random() * 900000));
-      otpStep.hidden = false;
-      otpInfo.innerHTML =
-        `Демо-код: <b>${demoCode}</b> — обычно приходит на ${method === "email" ? "email" : "SMS"}. ` +
-        `Это локальная демонстрация (реальные сообщения не отправляются).`;
-      go.innerHTML = `<i class="ti ti-check"></i> Подтвердить и войти`;
-      otpCode.focus();
-      return;
+    try {
+      hint.textContent = "Отправка…";
+      const r = await forgotPassword(val, method);
+      if (method === "email" && r.reset_token) renderResetForm(r.reset_token, val);
+      else if (method === "phone" && r.temp_password) renderPhoneReset(val, r.temp_password);
+    } catch (e) {
+      hint.textContent = (e as Error).message;
     }
-    if (otpCode.value.trim() !== demoCode) {
-      $("#loginhint").textContent = "Неверный код. Попробуйте ещё раз.";
-      return;
-    }
-    await doRegister();
   };
-
-  go.addEventListener("click", submit);
-  input.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key === "Enter") submit();
+  $("#fgo").addEventListener("click", go);
+  fid.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") go();
   });
-  otpCode.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key === "Enter") submit();
+}
+
+// Email reset: the user sets a new password directly (token is the demo "link").
+function renderResetForm(token: string, email: string): void {
+  root().innerHTML = loginShell(`
+    <p class="muted">Новый пароль для ${esc(email)}</p>
+    <p class="hint hint--left">Демо: «ссылка из письма» — токен <b>${esc(token.slice(0, 10))}…</b>. В реальном проекте ссылка приходит на почту.</p>
+    <input id="np" type="password" placeholder="Новый пароль" autocomplete="new-password" />
+    <p class="hint pw-hint">${PW_HINT}</p>
+    <button id="rgo" class="primary"><i class="ti ti-check"></i> Сохранить пароль</button>
+    <button id="rback" class="login-link" type="button">← Назад ко входу</button>
+    <p class="hint" id="rhint"></p>
+  `);
+  const np = $("#np") as HTMLInputElement;
+  const hint = $("#rhint");
+  np.focus();
+  $("#rback").addEventListener("click", renderLogin);
+  const go = async () => {
+    const err = pwPolicyError(np.value);
+    if (err) return void (hint.textContent = err);
+    try {
+      hint.textContent = "Сохранение…";
+      await resetPassword(token, np.value);
+      hint.textContent = "Пароль обновлён — войдите с новым паролем.";
+      setTimeout(renderLogin, 1000);
+    } catch (e) {
+      hint.textContent = (e as Error).message;
+    }
+  };
+  $("#rgo").addEventListener("click", go);
+  np.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") go();
+  });
+}
+
+// Phone reset: show the generated temp password (demo SMS), then log in and force a new password.
+function renderPhoneReset(phone: string, temp: string): void {
+  root().innerHTML = loginShell(`
+    <p class="muted">Сброс пароля по SMS</p>
+    <p class="hint hint--left">Демо: «SMS» на ${esc(phone)} — сгенерированный пароль:</p>
+    <div class="otp-code">${esc(temp)}</div>
+    <button id="pgo" class="primary"><i class="ti ti-arrow-right"></i> Войти и сменить пароль</button>
+    <button id="pback" class="login-link" type="button">← Назад ко входу</button>
+    <p class="hint" id="phint"></p>
+  `);
+  const hint = $("#phint");
+  $("#pback").addEventListener("click", renderLogin);
+  $("#pgo").addEventListener("click", async () => {
+    try {
+      hint.textContent = "Вход…";
+      renderChangeForm(await login(phone, "phone", temp));
+    } catch (e) {
+      hint.textContent = (e as Error).message;
+    }
+  });
+}
+
+// Forced password change after an SMS temporary password: set a permanent one, then open the app.
+function renderChangeForm(id: Identity): void {
+  root().innerHTML = loginShell(`
+    <p class="muted">Придумайте новый пароль</p>
+    <input id="cp" type="password" placeholder="Новый пароль" autocomplete="new-password" />
+    <p class="hint pw-hint">${PW_HINT}</p>
+    <button id="cgo" class="primary"><i class="ti ti-check"></i> Сохранить и войти</button>
+    <p class="hint" id="chint"></p>
+  `);
+  const cp = $("#cp") as HTMLInputElement;
+  const hint = $("#chint");
+  cp.focus();
+  const go = async () => {
+    const err = pwPolicyError(cp.value);
+    if (err) return void (hint.textContent = err);
+    try {
+      hint.textContent = "Сохранение…";
+      await changePassword(id.token, cp.value);
+      await applyIdentityAndStart(id);
+    } catch (e) {
+      hint.textContent = (e as Error).message;
+    }
+  };
+  $("#cgo").addEventListener("click", go);
+  cp.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") go();
   });
 }
 
@@ -1211,6 +1337,7 @@ interface AdminOverview {
   devices: number;
   queued_messages: number;
   maintenance: boolean;
+  pending_resets: number;
 }
 interface AdminUserRow {
   user_id: string;
@@ -1218,6 +1345,8 @@ interface AdminUserRow {
   email: string | null;
   phone: string | null;
   devices: number;
+  has_password: boolean;
+  must_change: boolean;
 }
 
 function getAdminToken(): string | null {
@@ -1267,7 +1396,7 @@ function mountAdminOverlay(): HTMLElement {
       <div class="mx-cap">Пользователи</div>
       <div class="mx-admin__tablewrap">
         <table>
-          <thead><tr><th>Имя</th><th>Email</th><th>Телефон</th><th>Устройства</th><th></th></tr></thead>
+          <thead><tr><th>Имя</th><th>Email</th><th>Телефон</th><th>Устройства</th><th>Пароль</th><th></th></tr></thead>
           <tbody id="adUsers"></tbody>
         </table>
       </div>
@@ -1328,6 +1457,7 @@ function renderAdminData(ov: AdminOverview, users: AdminUserRow[]): void {
       <div class="mx-stat"><div class="mx-stat__num">${ov.users}</div><div class="mx-stat__lbl">Пользователи</div></div>
       <div class="mx-stat"><div class="mx-stat__num">${ov.devices}</div><div class="mx-stat__lbl">Устройства</div></div>
       <div class="mx-stat"><div class="mx-stat__num">${ov.queued_messages}</div><div class="mx-stat__lbl">В очереди</div></div>
+      <div class="mx-stat"><div class="mx-stat__num">${ov.pending_resets ?? 0}</div><div class="mx-stat__lbl">Сбросы пароля</div></div>
       <div class="mx-stat"><div class="mx-stat__num">${ov.maintenance ? "Вкл" : "Выкл"}</div><div class="mx-stat__lbl">Обслуживание</div></div>`;
   }
   const maint = document.querySelector("#adMaint") as HTMLElement | null;
@@ -1343,11 +1473,18 @@ function renderAdminData(ov: AdminOverview, users: AdminUserRow[]): void {
               <td>${u.email ? esc(u.email) : "—"}</td>
               <td>${u.phone ? esc(u.phone) : "—"}</td>
               <td>${u.devices}</td>
+              <td>${
+                u.has_password
+                  ? u.must_change
+                    ? `<span class="mx-pwtag mx-pwtag--temp" title="Временный пароль (требуется смена)"><i class="ti ti-alert-triangle"></i> временный</span>`
+                    : `<span class="mx-pwtag mx-pwtag--set" title="Пароль задан (argon2-хэш)"><i class="ti ti-lock"></i> задан</span>`
+                  : `<span class="mx-pwtag mx-pwtag--none" title="Без пароля (демо-вход по имени)">—</span>`
+              }</td>
               <td><button class="mx-admin__del" data-del="${esc(u.user_id)}" title="Удалить" aria-label="Удалить пользователя"><i class="ti ti-trash"></i></button></td>
             </tr>`,
           )
           .join("")
-      : `<tr><td colspan="5" class="mx-admin__empty">Нет пользователей.</td></tr>`;
+      : `<tr><td colspan="6" class="mx-admin__empty">Нет пользователей.</td></tr>`;
     tbody.querySelectorAll<HTMLElement>("[data-del]").forEach((btn) =>
       btn.addEventListener("click", () => adminDeleteUser(btn.dataset.del!)),
     );

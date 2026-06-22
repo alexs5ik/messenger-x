@@ -27,6 +27,14 @@ pub struct User {
     /// Optional phone identifier (unique across accounts when present).
     #[serde(default)]
     pub phone: Option<String>,
+    /// Argon2 PHC password hash, when the account is password-protected. `None` for the
+    /// passwordless demo ("name") path. The cleartext password is never stored.
+    #[serde(default)]
+    pub password_hash: Option<String>,
+    /// Set when the current password is a server-generated temporary (e.g. issued by an SMS
+    /// password reset): the client must force the user to choose a new password on next login.
+    #[serde(default)]
+    pub must_change_password: bool,
 }
 
 impl User {
@@ -37,6 +45,8 @@ impl User {
             username: username.into(),
             email: None,
             phone: None,
+            password_hash: None,
+            must_change_password: false,
         }
     }
 
@@ -47,6 +57,8 @@ impl User {
             username: username.into(),
             email: None,
             phone: None,
+            password_hash: None,
+            must_change_password: false,
         }
     }
 

@@ -58,6 +58,11 @@ use futures_util::{
     sink::SinkExt,
     stream::{SplitSink, SplitStream, StreamExt},
 };
+use argon2::password_hash::{
+    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+};
+use argon2::Argon2;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -149,6 +154,8 @@ struct AppState {
     admin_token: Arc<String>,
     /// Global kill-switch: when true, message ingest is rejected.
     maintenance: Arc<AtomicBool>,
+    /// Pending email password-reset tokens (transient; not snapshotted).
+    resets: Arc<Mutex<HashMap<String, ResetEntry>>>,
 }
 
 impl AppState {
@@ -191,6 +198,7 @@ impl AppState {
                 std::env::var("MX_ADMIN_TOKEN").unwrap_or_else(|_| "mx-dev-admin".to_string()),
             ),
             maintenance: Arc::new(AtomicBool::new(false)),
+            resets: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -293,6 +301,75 @@ impl IntoResponse for ApiError {
 }
 
 // ===========================================================================
+// Password hashing & policy (argon2)
+// ===========================================================================
+
+/// How long an email reset token stays valid.
+const RESET_TTL_MS: i64 = 30 * 60 * 1000;
+/// Symbols used to guarantee a generated temp password satisfies the policy.
+const PW_SPECIALS: &[u8] = b"!@#$%^&*()-_=+?";
+
+/// A pending email password-reset: which account, and when the token expires.
+struct ResetEntry {
+    user_id: UserId,
+    expires_at: i64,
+}
+
+/// Enforce the password policy: at least 8 characters and at least one non-alphanumeric symbol.
+fn check_password_policy(pw: &str) -> Result<(), ApiError> {
+    if pw.chars().count() < 8 {
+        return Err(ApiError(Error::InvalidInput(
+            "пароль должен быть не короче 8 символов".into(),
+        )));
+    }
+    if !pw.chars().any(|c| !c.is_alphanumeric()) {
+        return Err(ApiError(Error::InvalidInput(
+            "пароль должен содержать хотя бы один спецсимвол".into(),
+        )));
+    }
+    Ok(())
+}
+
+/// Hash a password with argon2 (random salt), returning the PHC string to store.
+fn hash_password(pw: &str) -> Result<String, ApiError> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(pw.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| ApiError(Error::Internal(format!("password hash: {e}"))))
+}
+
+/// Verify a password against a stored argon2 PHC hash (constant-time inside argon2).
+fn verify_password(hash: &str, pw: &str) -> bool {
+    match PasswordHash::new(hash) {
+        Ok(parsed) => Argon2::default()
+            .verify_password(pw.as_bytes(), &parsed)
+            .is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Generate a policy-compliant temporary password (for the SMS reset flow).
+fn gen_temp_password() -> String {
+    const ALNUM: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let mut rng = rand::thread_rng();
+    let mut s: String = (0..9)
+        .map(|_| ALNUM[rng.gen_range(0..ALNUM.len())] as char)
+        .collect();
+    // Guarantee the policy regardless of the random draw: append a symbol and a digit.
+    s.push(PW_SPECIALS[rng.gen_range(0..PW_SPECIALS.len())] as char);
+    s.push(char::from(b'0' + rng.gen_range(0..10)));
+    s
+}
+
+/// Generate a random hex reset token.
+fn gen_reset_token() -> String {
+    const HEX: &[u8] = b"0123456789abcdef";
+    let mut rng = rand::thread_rng();
+    (0..32).map(|_| HEX[rng.gen_range(0..16)] as char).collect()
+}
+
+// ===========================================================================
 // Request / response DTOs
 // ===========================================================================
 
@@ -310,13 +387,18 @@ struct RegisterRequest {
     /// Optional phone identifier.
     #[serde(default)]
     phone: Option<String>,
+    /// Account password. Required when registering by email or phone; the passwordless "name"
+    /// demo path omits it. Validated against the policy and stored only as an argon2 hash.
+    #[serde(default)]
+    password: Option<String>,
     /// Long-term identity public key for the account's first device.
     identity_key: PublicKey,
 }
 
 /// `POST /v1/register` response: the freshly minted ids and a bearer session token.
 ///
-/// `Deserialize` is derived so tests (and any in-process client) can parse it back.
+/// `Deserialize` is derived so tests (and any in-process client) can parse it back. Reused for
+/// `/v1/login`; `must_change` is set when the user signed in with a temporary password.
 #[derive(Debug, Serialize, Deserialize)]
 struct RegisterResponse {
     /// The new account id.
@@ -325,6 +407,63 @@ struct RegisterResponse {
     device_id: DeviceId,
     /// Bearer token authenticating `(user_id, device_id)`; used for the WS `Hello`.
     token: String,
+    /// True when the session was opened with a server-generated temporary password and the
+    /// client must prompt the user to set a permanent one.
+    #[serde(default)]
+    must_change: bool,
+}
+
+/// `POST /v1/login` request: an identifier (email/phone/username) + password + a fresh device key.
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    phone: Option<String>,
+    password: String,
+    /// Identity public key for the device this login session creates.
+    identity_key: PublicKey,
+}
+
+/// `POST /v1/auth/forgot` request: which channel + identifier to start a reset for.
+#[derive(Debug, Deserialize)]
+struct ForgotRequest {
+    /// "email" or "phone".
+    method: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    phone: Option<String>,
+}
+
+/// `POST /v1/auth/forgot` response. In this demo build the secret is returned to the caller (the
+/// UI shows it) instead of being delivered over a real email/SMS provider.
+#[derive(Debug, Serialize)]
+struct ForgotResponse {
+    /// "email" → a reset link/token is issued; "phone" → a temporary password is generated.
+    channel: String,
+    /// Email flow: the one-time reset token (the UI builds a reset link from it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reset_token: Option<String>,
+    /// Phone flow: the generated temporary password the user logs in with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temp_password: Option<String>,
+}
+
+/// `POST /v1/auth/reset` request: complete an email reset with the token + a new password.
+#[derive(Debug, Deserialize)]
+struct ResetRequest {
+    token: String,
+    password: String,
+}
+
+/// `POST /v1/auth/change` request: set a new password for the authenticated session (used by the
+/// forced change after an SMS temporary password). Auth is the `Authorization: Bearer` token.
+#[derive(Debug, Deserialize)]
+struct ChangeRequest {
+    password: String,
 }
 
 /// JSON-safe transport wrapper for an [`Envelope`] in HTTP bodies.
@@ -357,15 +496,33 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Create a new account and its first device, then issue a session token.
+/// Create a new account and its first device, then issue a session token. Registering by email or
+/// phone requires a policy-compliant password (stored as an argon2 hash); the "name" demo path is
+/// passwordless.
 async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisterResponse>), ApiError> {
+    let has_contact = req.email.is_some() || req.phone.is_some();
+    let pw_hash = match req.password.as_deref().map(str::trim) {
+        Some(pw) if !pw.is_empty() => {
+            check_password_policy(pw)?;
+            Some(hash_password(pw)?)
+        }
+        _ if has_contact => {
+            return Err(ApiError(Error::InvalidInput(
+                "регистрация по email/телефону требует пароль".into(),
+            )));
+        }
+        _ => None,
+    };
     let user_id = state
         .auth
         .register_account(req.username, req.email, req.phone)
         .await?;
+    if let Some(h) = pw_hash {
+        state.users.set_password(user_id, Some(h), false).await;
+    }
     let device_id = state
         .auth
         .register_device(user_id, req.identity_key)
@@ -377,8 +534,145 @@ async fn register(
             user_id,
             device_id,
             token,
+            must_change: false,
         }),
     ))
+}
+
+/// Authenticate an existing account by identifier + password and open a new device session.
+async fn login(
+    State(state): State<AppState>,
+    Json(req): Json<LoginRequest>,
+) -> Result<Json<RegisterResponse>, ApiError> {
+    // Resolve the account by whichever identifier was supplied.
+    let user = if let Some(email) = req.email.as_deref() {
+        state.users.find_by_email(email.trim()).await
+    } else if let Some(phone) = req.phone.as_deref() {
+        state.users.find_by_phone(phone.trim()).await
+    } else if let Some(username) = req.username.as_deref() {
+        state.users.find_by_username(username.trim()).await
+    } else {
+        None
+    };
+    let user = user.ok_or_else(|| ApiError(Error::Unauthorized))?;
+    let hash = user
+        .password_hash
+        .as_deref()
+        .ok_or_else(|| ApiError(Error::Unauthorized))?;
+    if !verify_password(hash, req.password.trim()) {
+        return Err(ApiError(Error::Unauthorized));
+    }
+    let device_id = state.auth.register_device(user.id, req.identity_key).await?;
+    let token = state.auth.issue_token(user.id, device_id, now_ms());
+    Ok(Json(RegisterResponse {
+        user_id: user.id,
+        device_id,
+        token,
+        must_change: user.must_change_password,
+    }))
+}
+
+/// Start a password reset. Email → issue a one-time reset token; phone → generate a temporary
+/// password and mark the account must-change. In this demo the secret is returned to the caller.
+async fn forgot_password(
+    State(state): State<AppState>,
+    Json(req): Json<ForgotRequest>,
+) -> Result<Json<ForgotResponse>, ApiError> {
+    match req.method.as_str() {
+        "email" => {
+            let email = req.email.unwrap_or_default();
+            let user = state
+                .users
+                .find_by_email(email.trim())
+                .await
+                .ok_or_else(|| ApiError(Error::NotFound("email не зарегистрирован".into())))?;
+            let token = gen_reset_token();
+            state.resets.lock().await.insert(
+                token.clone(),
+                ResetEntry {
+                    user_id: user.id,
+                    expires_at: now_ms() + RESET_TTL_MS,
+                },
+            );
+            Ok(Json(ForgotResponse {
+                channel: "email".into(),
+                reset_token: Some(token),
+                temp_password: None,
+            }))
+        }
+        "phone" => {
+            let phone = req.phone.unwrap_or_default();
+            let user = state
+                .users
+                .find_by_phone(phone.trim())
+                .await
+                .ok_or_else(|| ApiError(Error::NotFound("телефон не зарегистрирован".into())))?;
+            let temp = gen_temp_password();
+            let hash = hash_password(&temp)?;
+            state.users.set_password(user.id, Some(hash), true).await;
+            Ok(Json(ForgotResponse {
+                channel: "phone".into(),
+                reset_token: None,
+                temp_password: Some(temp),
+            }))
+        }
+        other => Err(ApiError(Error::InvalidInput(format!(
+            "unknown reset method: {other}"
+        )))),
+    }
+}
+
+/// Complete an email reset: validate the token, enforce the policy, set the new password.
+async fn reset_password(
+    State(state): State<AppState>,
+    Json(req): Json<ResetRequest>,
+) -> Result<StatusCode, ApiError> {
+    // Validate the password BEFORE consuming the token, so a rejected weak password leaves the
+    // reset link still usable for a retry.
+    check_password_policy(req.password.trim())?;
+    let hash = hash_password(req.password.trim())?;
+    let entry = {
+        let mut resets = state.resets.lock().await;
+        match resets.get(&req.token) {
+            Some(e) if e.expires_at >= now_ms() => resets.remove(&req.token),
+            Some(_) => {
+                resets.remove(&req.token); // expired → drop it
+                None
+            }
+            None => None,
+        }
+    };
+    let entry = entry.ok_or_else(|| {
+        ApiError(Error::InvalidInput(
+            "ссылка сброса недействительна или истекла".into(),
+        ))
+    })?;
+    state.users.set_password(entry.user_id, Some(hash), false).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Set a new password for the authenticated session (forced change after an SMS temp password, or
+/// a voluntary change). Authenticated by the `Authorization: Bearer <token>` header.
+async fn change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ChangeRequest>,
+) -> Result<StatusCode, ApiError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or_else(|| ApiError(Error::Unauthorized))?;
+    let claims = state
+        .auth
+        .verify_token(token, now_ms())
+        .map_err(|_| ApiError(Error::Unauthorized))?;
+    check_password_policy(req.password.trim())?;
+    let hash = hash_password(req.password.trim())?;
+    if !state.users.set_password(claims.user, Some(hash), false).await {
+        return Err(ApiError(Error::NotFound("user".into())));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Publish (or replace) a device's pre-key bundle.
@@ -479,6 +773,8 @@ struct AdminOverview {
     devices: usize,
     queued_messages: usize,
     maintenance: bool,
+    /// Active (non-expired) email password-reset tokens awaiting use.
+    pending_resets: usize,
 }
 
 /// One row of the admin user table.
@@ -489,6 +785,10 @@ struct AdminUserRow {
     email: Option<String>,
     phone: Option<String>,
     devices: usize,
+    /// Whether the account is password-protected (the hash itself is never exposed).
+    has_password: bool,
+    /// Whether the account is on a temporary password and must set a new one.
+    must_change: bool,
 }
 
 #[derive(Deserialize)]
@@ -509,11 +809,20 @@ struct MaintenanceRequest {
 /// Build the current overview snapshot (shared by `GET /overview` and the maintenance toggle).
 async fn build_overview(state: &AppState) -> AdminOverview {
     let (users, devices) = state.users.export().await;
+    let now = now_ms();
+    let pending_resets = state
+        .resets
+        .lock()
+        .await
+        .values()
+        .filter(|e| e.expires_at >= now)
+        .count();
     AdminOverview {
         users: users.len(),
         devices: devices.len(),
         queued_messages: state.queue.total_len().await,
         maintenance: state.maintenance.load(Ordering::Relaxed),
+        pending_resets,
     }
 }
 
@@ -539,6 +848,8 @@ async fn admin_users(
             let count = devices.iter().filter(|d| d.user_id == u.id).count();
             AdminUserRow {
                 user_id: u.id,
+                has_password: u.password_hash.is_some(),
+                must_change: u.must_change_password,
                 username: u.username,
                 email: u.email,
                 phone: u.phone,
@@ -805,6 +1116,10 @@ fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
         .route("/v1/register", post(register))
+        .route("/v1/login", post(login))
+        .route("/v1/auth/forgot", post(forgot_password))
+        .route("/v1/auth/reset", post(reset_password))
+        .route("/v1/auth/change", post(change_password))
         .route("/v1/prekeys", post(publish_prekeys))
         .route("/v1/prekeys/:device", get(fetch_prekeys))
         .route("/v1/users/:user/prekey", get(fetch_user_prekey))

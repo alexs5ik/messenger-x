@@ -506,6 +506,28 @@ button.mx-row:hover { background: var(--side-hover); }
 .login-method.is-active { border-color: var(--accent); color: var(--card-txt); }
 .login-otp .hint { margin-top: 0; text-align: left; }
 .login-otp input { margin-top: 8px; }
+/* Login/register switch */
+.login-tabs { display: flex; gap: 6px; margin: 0 0 4px; }
+.login-tab {
+  flex: 1; padding: 8px; border: none; border-bottom: 2px solid transparent; background: transparent;
+  color: var(--side-txt2); font-size: 13.5px; font-weight: 500;
+}
+.login-tab:hover { color: var(--card-txt); }
+.login-tab.is-active { color: var(--card-txt); border-bottom-color: var(--accent); }
+/* Text link buttons (forgot / back) */
+.login-link {
+  display: inline-block; margin-top: 12px; border: none; background: transparent;
+  color: var(--side-txt2); font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px;
+}
+.login-link:hover { color: var(--accent); }
+.hint--left { text-align: left; }
+.pw-hint { margin-top: 6px; text-align: left; }
+/* Generated demo password / code block */
+.otp-code {
+  margin: 6px 0 4px; padding: 12px; border-radius: var(--radius-sm); border: 1px dashed var(--accent);
+  background: var(--field-bg); color: var(--card-txt); font-size: 18px; font-weight: 600;
+  letter-spacing: .04em; font-variant-numeric: tabular-nums; user-select: all; text-align: center;
+}
 .mx-id__contact { font-size: 12.5px; color: var(--side-txt2); margin-top: 3px; display: inline-flex; gap: 6px; align-items: center; }
 .mx-id__contact .ti { font-size: 14px; }
 
@@ -552,6 +574,10 @@ button.mx-row:hover { background: var(--side-hover); }
 }
 .mx-admin__del:hover { color: #e0564f; background: var(--bub-in-bg); }
 .mx-admin__err { color: #e0564f; font-size: 13px; padding: 0 20px 20px; }
+.mx-pwtag { display: inline-flex; gap: 5px; align-items: center; font-size: 11.5px; border-radius: 8px; padding: 2px 8px; }
+.mx-pwtag--set { color: var(--accent); background: rgba(58,160,106,.12); }
+.mx-pwtag--temp { color: #c98a2b; background: rgba(201,138,43,.14); }
+.mx-pwtag--none { color: var(--chat-txt3); }
 
 /* ---------- System announcement banner ---------- */
 .mx-announce {
