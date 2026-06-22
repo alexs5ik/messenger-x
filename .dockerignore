@@ -9,3 +9,6 @@ data
 # Windows-only toolchain pin — must NOT reach the Linux container build (it pins a
 # stable-x86_64-pc-windows-gnu channel that fails on Linux). Cargo uses the image default.
 rust-toolchain.toml
+# Windows-only cargo config (target-dir = "C:/mx_target") — the C: path is invalid on
+# Linux and breaks the build. Let cargo use its default ./target in the container.
+.cargo

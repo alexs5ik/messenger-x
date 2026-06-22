@@ -10,9 +10,9 @@ RUN rustup target add wasm32-unknown-unknown \
         || cargo install wasm-pack --locked)
 # Copy the whole workspace (wasm-pack needs the crate + its path deps).
 COPY . .
-# Drop the Windows-only toolchain pin (rust-toolchain.toml) so cargo uses the Linux image
-# default, then build the wasm bundle into web/src/mxwasm (matches package.json build:wasm).
-RUN rm -f rust-toolchain.toml \
+# Drop the Windows-only toolchain pin + cargo config (target-dir = C:/...) so cargo uses the
+# Linux image defaults, then build the wasm bundle into web/src/mxwasm (matches build:wasm).
+RUN rm -f rust-toolchain.toml .cargo/config.toml \
     && wasm-pack build crates/mx-crypto-wasm --target web --out-dir /src/web/src/mxwasm
 
 # ---- Stage B: build the static frontend ------------------------------------
@@ -30,8 +30,9 @@ RUN npm run build   # -> /web/dist
 FROM rust:1-bookworm AS server
 WORKDIR /src
 COPY . .
-# Drop the Windows-only toolchain pin so the Linux image default stable is used.
-RUN rm -f rust-toolchain.toml \
+# Drop the Windows-only toolchain pin + cargo config so Linux defaults are used and the
+# binary lands in the default /src/target/release/mx that the runtime stage copies.
+RUN rm -f rust-toolchain.toml .cargo/config.toml \
     && cargo build --release -p mx-server   # -> /src/target/release/mx
 
 # ---- Final: minimal runtime ------------------------------------------------
