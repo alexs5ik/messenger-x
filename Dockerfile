@@ -3,12 +3,17 @@
 # ---- Stage A: build the wasm crypto bundle ---------------------------------
 FROM rust:1-bookworm AS wasm
 WORKDIR /src
+# Prefer the prebuilt wasm-pack binary (fast, light on the free-tier builder); fall back to
+# compiling it if the installer is unavailable.
 RUN rustup target add wasm32-unknown-unknown \
-    && cargo install wasm-pack --locked
+    && (curl -sSfL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh \
+        || cargo install wasm-pack --locked)
 # Copy the whole workspace (wasm-pack needs the crate + its path deps).
 COPY . .
-# Produces web/src/mxwasm (matches package.json build:wasm output dir).
-RUN wasm-pack build crates/mx-crypto-wasm --target web --out-dir /src/web/src/mxwasm
+# Drop the Windows-only toolchain pin (rust-toolchain.toml) so cargo uses the Linux image
+# default, then build the wasm bundle into web/src/mxwasm (matches package.json build:wasm).
+RUN rm -f rust-toolchain.toml \
+    && wasm-pack build crates/mx-crypto-wasm --target web --out-dir /src/web/src/mxwasm
 
 # ---- Stage B: build the static frontend ------------------------------------
 FROM node:20-bookworm AS web
@@ -25,7 +30,9 @@ RUN npm run build   # -> /web/dist
 FROM rust:1-bookworm AS server
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p mx-server   # -> /src/target/release/mx
+# Drop the Windows-only toolchain pin so the Linux image default stable is used.
+RUN rm -f rust-toolchain.toml \
+    && cargo build --release -p mx-server   # -> /src/target/release/mx
 
 # ---- Final: minimal runtime ------------------------------------------------
 FROM debian:bookworm-slim
