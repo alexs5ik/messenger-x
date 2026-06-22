@@ -158,9 +158,29 @@ function upsertGroupSync(g: Group): void {
   }
   saveGroups();
 }
-// Admin = the explicit creator, or (for groups stored before this field existed) members[0].
+// Admin = the explicit creator, or you for locally-held groups with no recorded creator
+// (legacy groups, or ones orphaned by an identity reset). In this client-side model the
+// device that holds the group manages it.
 function isGroupAdmin(g: Group): boolean {
-  return (g.creator ?? g.members[0]) === identity!.userId;
+  return !g.creator || g.creator === identity!.userId || g.members[0] === identity!.userId;
+}
+
+// Adopt locally-held groups that have no creator (created before the field existed, or left
+// orphaned when the identity reset on a storage-version bump): make the current account their
+// owner and ensure it is a member, so management + sending work.
+function migrateGroups(): void {
+  let changed = false;
+  for (const g of groups) {
+    if (!g.creator) {
+      g.creator = identity!.userId;
+      changed = true;
+    }
+    if (!g.members.includes(identity!.userId)) {
+      g.members.unshift(identity!.userId);
+      changed = true;
+    }
+  }
+  if (changed) saveGroups();
 }
 // Re-send the current group definition as a ginvite to a set of recipients (sync roster/name).
 async function broadcastRoster(g: Group, to: string[]): Promise<void> {
@@ -406,6 +426,7 @@ function renderLogin(): void {
 function startApp(): void {
   loadProfile();
   loadGroups();
+  migrateGroups();
   renderApp();
   socket = new MxSocket(identity!.token, onIncoming, (s) => {
     const dot = document.querySelector("#status") as HTMLElement | null;
