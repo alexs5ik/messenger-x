@@ -40,7 +40,14 @@ function unb64(s: string): Uint8Array {
   return out;
 }
 
+// Long-lived identity material persists across sessions (localStorage): the device's secret blob
+// and its published bundle, so a returning user can re-announce itself without re-registering.
 const SECRETS_KEY = "mx.secrets";
+const BUNDLE_KEY = "mx.bundle";
+// Double-Ratchet session state is deliberately EPHEMERAL (sessionStorage): it resets when the tab
+// closes, so the next session re-runs the PQXDH handshake against the peer's current bundle. This
+// self-heals after a peer re-registers or the server loses its prekey state — persisting it caused
+// the sender to keep a stale ratchet and silently fail to deliver.
 const OUT_KEY = "mx.sessions.out";
 const IN_KEY = "mx.sessions.in";
 
@@ -53,16 +60,23 @@ function loadSecrets(): Uint8Array {
 type OutSession = { ratchet: string; init: string; sentInit: boolean };
 type InSession = { ratchet: string };
 const loadMap = <T>(key: string): Record<string, T> =>
-  JSON.parse(localStorage.getItem(key) ?? "{}") as Record<string, T>;
-const saveMap = (key: string, m: unknown): void => localStorage.setItem(key, JSON.stringify(m));
+  JSON.parse(sessionStorage.getItem(key) ?? "{}") as Record<string, T>;
+const saveMap = (key: string, m: unknown): void => sessionStorage.setItem(key, JSON.stringify(m));
 
-/// Provision this device: create an account, store the secret blob, return the bundle JSON to
-/// publish. Call once per registration; on reload the existing secrets are reused.
+/// Provision this device: create an account, store the secret blob + bundle, return the bundle
+/// JSON to publish. Call once per registration; the stored bundle lets us re-announce on reload.
 export async function provisionAccount(deviceId: string): Promise<string> {
   await ensureReady();
   const acc = account_create(deviceId);
   localStorage.setItem(SECRETS_KEY, b64(acc.secrets));
+  localStorage.setItem(BUNDLE_KEY, acc.bundle_json);
   return acc.bundle_json;
+}
+
+/// The bundle published at provision time, if any — used to re-publish on startup so a server that
+/// lost its prekey directory (restart/redeploy) re-learns this device. Null if never provisioned.
+export function storedBundle(): string | null {
+  return localStorage.getItem(BUNDLE_KEY);
 }
 
 async function fetchBundle(peer: string): Promise<string> {

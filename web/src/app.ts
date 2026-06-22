@@ -10,7 +10,7 @@ import {
   type RegisterMethod,
   type WireEnvelope,
 } from "./api";
-import { encrypt, decrypt, provisionAccount, pqStatus } from "./crypto";
+import { encrypt, decrypt, provisionAccount, storedBundle, pqStatus } from "./crypto";
 import { initDevice, isMobile, type DeviceClass } from "./device";
 
 interface Contact {
@@ -55,7 +55,10 @@ type AppMsg =
 const LS = { profile: "mx.profile", groups: "mx.groups", admin: "mx.admin" };
 
 // Bump when the shape of any stored data changes so old clients auto-reset instead of breaking.
-// (Bumped to 7 when identity/keys/threads moved from sessionStorage to localStorage for persistence.)
+// 7: identity/keys/threads persist in localStorage (stay signed in across closes). Ratchet sessions
+//    stay in sessionStorage (see crypto.ts) so delivery self-heals each session — no bump needed
+//    for that fix; the orphaned v7 localStorage session blobs are simply ignored, and the prekey
+//    bundle is re-announced on startup (republishPrekeys) to recover from server state loss.
 const STORAGE_VERSION = "7";
 
 // Account data lives in localStorage so a registered session persists across tab/browser closes
@@ -490,6 +493,18 @@ function renderLogin(): void {
 }
 
 // ---------- App ----------
+// Re-publish this device's prekey bundle (or provision one if missing) so peers can start sessions
+// with us even after the server lost state. Silent on failure — the WS still works for receiving.
+async function republishPrekeys(): Promise<void> {
+  if (!identity) return;
+  try {
+    const bundle = storedBundle() ?? (await provisionAccount(identity.deviceId));
+    await publishPrekeys(bundle);
+  } catch {
+    /* offline or server unavailable — peers will reconnect later */
+  }
+}
+
 function startApp(): void {
   loadProfile();
   loadGroups();
@@ -506,6 +521,10 @@ function startApp(): void {
   // The server pushes messages over the WebSocket in real time (queued ones on connect,
   // live ones via its per-session hub), so the client just listens — no polling.
   socket.connect();
+
+  // Returning user: re-announce our prekey bundle so a server that lost its directory (restart or
+  // redeploy on an ephemeral host) can still hand it to peers who want to message us. Best-effort.
+  void republishPrekeys();
 
   // Prove the post-quantum crypto core runs in-browser (wasm) and reflect it in the badge.
   void pqStatus().then((s) => {
