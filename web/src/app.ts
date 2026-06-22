@@ -1442,8 +1442,17 @@ async function refreshAdmin(): Promise<void> {
     renderAdminData(ov, us);
   } catch (e) {
     if ((e as Error).message === "unauthorized") {
+      // Wrong key: drop it and offer to re-enter inline (no need to close/reopen the console).
       localStorage.removeItem(LS.admin);
-      adminError("Неверный ключ. Доступ запрещён. Откройте консоль снова, чтобы ввести ключ.");
+      const next = prompt(
+        "Неверный ключ администратора. Введите корректный MX_ADMIN_TOKEN (по умолчанию «mx-dev-admin», если он не задан на сервере):",
+      )?.trim();
+      if (next) {
+        localStorage.setItem(LS.admin, next);
+        await refreshAdmin();
+      } else {
+        adminError("Неверный ключ. Доступ запрещён. Откройте консоль снова, чтобы ввести ключ.");
+      }
     } else {
       adminError("Ошибка: " + (e as Error).message);
     }
