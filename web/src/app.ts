@@ -312,6 +312,57 @@ function cycleTheme(): void {
   if (btn) btn.title = `Тема: ${THEME_LABEL[next]}`;
 }
 
+// ---------- Chat wallpaper ----------
+// Built-in vertical wallpapers live in /public/wallpapers as wp-N.jpg (full) + wp-N-t.jpg (thumb).
+// The chosen id ("" = none, "wp-N" = built-in, "custom" = user upload) is persisted per account,
+// and applied to the chat feed via the --chat-wp CSS variable + data-wp on <html>.
+const WALLPAPER_COUNT = 10;
+const WP_KEY = "mx.wallpaper";
+const WP_CUSTOM_KEY = "mx.wallpaper.custom";
+
+function currentWallpaper(): string {
+  return localStorage.getItem(WP_KEY) ?? "";
+}
+function wallpaperUrl(id: string): string {
+  if (!id) return "";
+  if (id === "custom") return localStorage.getItem(WP_CUSTOM_KEY) ?? "";
+  return `/wallpapers/${id}.jpg`;
+}
+function applyWallpaper(id: string): void {
+  const root = document.documentElement;
+  const url = wallpaperUrl(id);
+  if (url) {
+    root.style.setProperty("--chat-wp", `url("${url}")`);
+    root.dataset.wp = "on";
+  } else {
+    root.style.removeProperty("--chat-wp");
+    root.dataset.wp = "off";
+  }
+  localStorage.setItem(WP_KEY, id);
+}
+// Downscale an uploaded image to a <=1080px-wide JPEG data URL (keeps localStorage small).
+function fileToWallpaper(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const maxW = 1080;
+      const scale = Math.min(1, maxW / img.width);
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(img.width * scale);
+      cv.height = Math.round(img.height * scale);
+      cv.getContext("2d")!.drawImage(img, 0, 0, cv.width, cv.height);
+      resolve(cv.toDataURL("image/jpeg", 0.7));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("bad image"));
+    };
+    img.src = url;
+  });
+}
+
 export function mount(): void {
   initDevice(onDeviceChange);
   applyTheme(currentTheme());
@@ -324,6 +375,7 @@ export function mount(): void {
     clearAccount();
     localStorage.setItem("mx.ver", STORAGE_VERSION);
   }
+  applyWallpaper(currentWallpaper());
   const rawId = localStorage.getItem(SS.identity);
   if (rawId) {
     identity = JSON.parse(rawId) as Identity;
@@ -566,6 +618,23 @@ function renderProfilePanel(): string {
     </button>`;
   }).join("");
 
+  // Wallpaper picker: "none" tile + built-in thumbnails + an upload tile (custom photo).
+  const wp = currentWallpaper();
+  const chk = `<i class="ti ti-check mx-wp__chk"></i>`;
+  const noneTile = `<button class="mx-wp mx-wp--none ${wp === "" ? "is-active" : ""}" data-wp="" aria-label="Без обоев"><i class="ti ti-ban mx-wp__ic"></i>${wp === "" ? chk : ""}</button>`;
+  const builtinTiles = Array.from({ length: WALLPAPER_COUNT }, (_, i) => {
+    const id = `wp-${i + 1}`;
+    const active = wp === id;
+    return `<button class="mx-wp ${active ? "is-active" : ""}" data-wp="${id}" style="background-image:url('/wallpapers/${id}-t.jpg')" aria-label="Обои ${i + 1}">${active ? chk : ""}</button>`;
+  }).join("");
+  const customActive = wp === "custom";
+  const customStyle = customActive ? ` style="background-image:url('${esc(wallpaperUrl("custom"))}')"` : "";
+  const uploadTile = `<label class="mx-wp mx-wp--upload ${customActive ? "is-active" : ""}"${customStyle} title="Своё фото">
+    <input type="file" accept="image/*" id="mxWpFile" hidden />
+    ${customActive ? chk : `<i class="ti ti-photo-plus mx-wp__ic"></i>`}
+  </label>`;
+  const wpTiles = noneTile + builtinTiles + uploadTile;
+
   return `
   <div class="mx-backdrop" data-close></div>
   <aside class="mx-panel" role="dialog" aria-modal="true" aria-label="Профиль и настройки">
@@ -652,6 +721,9 @@ function renderProfilePanel(): string {
 
       <div class="mx-cap">Оформление</div>
       <div class="mx-themes">${themeTiles}</div>
+
+      <div class="mx-cap">Обои чата</div>
+      <div class="mx-wps">${wpTiles}</div>
 
       <div class="mx-cap">Настройки</div>
       <div class="mx-row mx-row--static"><i class="ti ti-bell mx-row__ic"></i><span class="mx-row__label">Уведомления</span><span class="mx-row__trail"><button class="mx-toggle" id="mxNotif" role="switch" aria-checked="true" aria-label="Уведомления"></button></span></div>
@@ -863,6 +935,45 @@ function wireProfilePanel(wrap: HTMLElement): void {
       if (railBtn) railBtn.title = `Тема: ${THEME_LABEL[t]}`;
     }),
   );
+
+  // Wallpaper picker: built-in tiles (incl. "none") + custom upload.
+  const markWpActive = (el: Element | null) => {
+    wrap.querySelectorAll(".mx-wp").forEach((t) => {
+      const on = t === el;
+      t.classList.toggle("is-active", on);
+      const old = t.querySelector(".mx-wp__chk");
+      if (on && !old) {
+        const i = document.createElement("i");
+        i.className = "ti ti-check mx-wp__chk";
+        t.appendChild(i);
+      } else if (!on && old) {
+        old.remove();
+      }
+    });
+  };
+  wrap.querySelectorAll<HTMLElement>(".mx-wp[data-wp]").forEach((tile) =>
+    tile.addEventListener("click", () => {
+      applyWallpaper(tile.dataset.wp!);
+      markWpActive(tile);
+    }),
+  );
+  const wpFile = wrap.querySelector("#mxWpFile") as HTMLInputElement | null;
+  wpFile?.addEventListener("change", async () => {
+    const f = wpFile.files?.[0];
+    if (!f) return;
+    try {
+      const data = await fileToWallpaper(f);
+      localStorage.setItem(WP_CUSTOM_KEY, data);
+      applyWallpaper("custom");
+      const tile = wpFile.closest(".mx-wp");
+      if (tile) (tile as HTMLElement).style.backgroundImage = `url("${data}")`;
+      tile?.querySelector(".mx-wp__ic")?.remove();
+      markWpActive(tile);
+    } catch {
+      /* ignore unreadable images */
+    }
+    wpFile.value = "";
+  });
 
   wrap.querySelector("#mxAdminEntry")?.addEventListener("click", openAdminConsole);
 

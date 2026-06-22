@@ -164,7 +164,18 @@ button.primary:hover { filter: brightness(1.1); }
 .chat-sub .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block; }
 .main .icon { color: var(--chat-txt2); }
 .main .icon:hover { background: var(--bub-in-bg); color: var(--chat-txt); }
-.feed { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 9px; }
+.feed {
+  flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 9px;
+  background-color: var(--chat-bg); background-size: cover; background-position: center;
+}
+/* Chat wallpaper (set by the picker via --chat-wp + data-wp on <html>). A theme-tinted scrim is
+   layered over the image so message bubbles stay legible across light/dark themes. */
+html[data-wp="on"] .feed {
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--chat-bg) 16%, transparent),
+                    color-mix(in srgb, var(--chat-bg) 16%, transparent)),
+    var(--chat-wp, none);
+}
 .bubble { max-width: 72%; padding: 9px 13px; border-radius: var(--radius); font-size: 13.5px; line-height: 1.45; }
 .mx-hd-open { cursor: pointer; }
 .chat-hd .mx-grp-av.mx-hd-open:hover { box-shadow: 0 0 0 2px var(--chat-line); }
@@ -317,6 +328,23 @@ button.mx-row:hover { background: var(--side-hover); }
 .mx-theme__lbl { font-size: 12px; }
 .mx-theme.is-active { box-shadow: 0 0 0 2px var(--side-txt); color: var(--side-txt); }
 .mx-theme__chk { position: absolute; top: 7px; right: 8px; font-size: 13px; color: var(--side-txt); }
+
+/* wallpaper tiles — tall thumbnails (matches the vertical wallpapers) in a 4-up grid */
+.mx-wps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 2px 14px 0; }
+.mx-wp {
+  position: relative; aspect-ratio: 9 / 16; border: 1px solid var(--side-line);
+  border-radius: var(--radius-sm); overflow: hidden; padding: 0; cursor: pointer;
+  background-color: var(--side-hover); background-size: cover; background-position: center;
+  color: var(--side-txt2); display: grid; place-items: center;
+}
+.mx-wp:hover { border-color: var(--accent); }
+.mx-wp__ic { font-size: 20px; }
+.mx-wp--none { background-image: none; }
+.mx-wp.is-active { box-shadow: 0 0 0 2px var(--side-txt); }
+.mx-wp__chk {
+  position: absolute; top: 5px; right: 5px; width: 18px; height: 18px; border-radius: 50%;
+  background: rgba(0,0,0,.5); color: #fff; font-size: 12px; display: grid; place-items: center;
+}
 
 /* footer */
 .mx-foot {
