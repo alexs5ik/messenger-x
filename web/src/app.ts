@@ -18,6 +18,14 @@ interface Contact {
   name: string;
 }
 type MsgStatus = "pending" | "sent" | "delivered";
+// An attachment carried inside a message: the bytes live in `data` as a data URL (E2E-encrypted
+// like any other payload). Images are downscaled before send; other files are capped (MAX_ATTACH).
+interface Attachment {
+  name: string;
+  mime: string;
+  size: number; // bytes of the encoded payload (post-downscale for images)
+  data: string; // data: URL
+}
 interface Msg {
   id?: string;
   mine: boolean;
@@ -25,6 +33,7 @@ interface Msg {
   ts: number;
   status?: MsgStatus;
   from?: string; // sender userId — used to label incoming group messages
+  att?: Attachment; // present when the message is a file/image attachment
 }
 
 // Client-side editable profile, persisted in localStorage alongside the identity, keys and
@@ -50,7 +59,9 @@ interface Group {
 type AppMsg =
   | { t: "text"; text: string }
   | { t: "ginvite"; g: string; name: string; kind: GroupKind; members: string[]; creator?: string }
-  | { t: "gtext"; g: string; text: string };
+  | { t: "gtext"; g: string; text: string }
+  | { t: "file"; name: string; mime: string; size: number; data: string }
+  | { t: "gfile"; g: string; name: string; mime: string; size: number; data: string };
 
 const LS = { profile: "mx.profile", groups: "mx.groups", admin: "mx.admin" };
 
@@ -234,6 +245,121 @@ async function sendApp(peer: string, msg: AppMsg): Promise<void> {
     kind: "chat",
     ciphertext: Array.from(payload),
     ts: Date.now(),
+  });
+}
+
+// ---------- Attachments (files & images) ----------
+// Cap raw files: the ciphertext is serialized as a JSON byte array over the WS, so payloads inflate
+// ~4–5×. Keep attachments small; images are downscaled, other files are hard-capped.
+const MAX_ATTACH = 2 * 1024 * 1024; // 2 MB
+const IMG_MAX_DIM = 1280;
+
+function isImage(mime: string): boolean {
+  return mime.startsWith("image/");
+}
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} КБ`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
+}
+// Short thread-preview label for an attachment (shown in the contact list).
+function attachLabel(att: Attachment): string {
+  return isImage(att.mime) ? "📷 Фото" : `📎 ${att.name}`;
+}
+// Read a File into an Attachment: images are downscaled to a JPEG data URL; other files are read
+// as-is (rejected over MAX_ATTACH). Rough byte size is derived from the data URL length.
+function fileToAttachment(file: File): Promise<Attachment> {
+  const dataUrlBytes = (url: string) => Math.round((url.length - (url.indexOf(",") + 1)) * 0.75);
+  if (isImage(file.type) && file.type !== "image/gif") {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const scale = Math.min(1, IMG_MAX_DIM / Math.max(img.width, img.height));
+        const cv = document.createElement("canvas");
+        cv.width = Math.max(1, Math.round(img.width * scale));
+        cv.height = Math.max(1, Math.round(img.height * scale));
+        cv.getContext("2d")!.drawImage(img, 0, 0, cv.width, cv.height);
+        const data = cv.toDataURL("image/jpeg", 0.82);
+        resolve({ name: file.name, mime: "image/jpeg", size: dataUrlBytes(data), data });
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("bad image"));
+      };
+      img.src = url;
+    });
+  }
+  if (file.size > MAX_ATTACH) {
+    return Promise.reject(new Error(`Файл больше ${fmtSize(MAX_ATTACH)}`));
+  }
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () =>
+      resolve({
+        name: file.name,
+        mime: file.type || "application/octet-stream",
+        size: file.size,
+        data: fr.result as string,
+      });
+    fr.onerror = () => reject(new Error("read failed"));
+    fr.readAsDataURL(file);
+  });
+}
+
+// Send one attachment to the active 1:1 or group chat (mirrors sendMessage's routing).
+async function sendAttachment(att: Attachment): Promise<void> {
+  if (!active || !identity) return;
+  const label = attachLabel(att);
+  const grp = findGroup(active);
+  if (grp) {
+    for (const m of grp.members) {
+      if (m === identity.userId) continue;
+      await sendApp(m, { t: "gfile", g: grp.id, name: att.name, mime: att.mime, size: att.size, data: att.data });
+    }
+    loadThread(grp.id).push({ id: crypto.randomUUID(), mine: true, text: label, ts: Date.now(), att });
+    saveThread(grp.id);
+    renderFeed();
+    renderContacts();
+    return;
+  }
+  const payload = await encrypt(
+    identity.userId,
+    active,
+    JSON.stringify({ t: "file", name: att.name, mime: att.mime, size: att.size, data: att.data }),
+  );
+  const env: WireEnvelope = {
+    id: crypto.randomUUID(),
+    from: identity.deviceId,
+    to: { direct: active },
+    kind: "chat",
+    ciphertext: Array.from(payload),
+    ts: Date.now(),
+  };
+  socket?.send(env);
+  loadThread(active).push({ id: env.id, mine: true, text: label, ts: env.ts, status: "pending", att });
+  saveThread(active);
+  renderFeed();
+  renderContacts();
+}
+
+// Wire the "+" attach button + its hidden file input inside a rendered chat (1:1 or group).
+function wireAttach(main: HTMLElement): void {
+  const btn = main.querySelector("#attach") as HTMLElement | null;
+  const file = main.querySelector("#attachFile") as HTMLInputElement | null;
+  if (!btn || !file) return;
+  btn.addEventListener("click", () => file.click());
+  file.addEventListener("change", async () => {
+    const files = Array.from(file.files ?? []);
+    file.value = "";
+    for (const f of files) {
+      try {
+        await sendAttachment(await fileToAttachment(f));
+      } catch (e) {
+        alert(`Не удалось отправить «${f.name}»: ${(e as Error).message}`);
+      }
+    }
   });
 }
 
@@ -1623,6 +1749,8 @@ function renderMain(): void {
     </div>
     <div id="feed" class="feed"></div>
     <div class="inbar">
+      <button id="attach" class="icon" title="Прикрепить файл" aria-label="Прикрепить файл"><i class="ti ti-plus"></i></button>
+      <input id="attachFile" type="file" multiple hidden />
       <input id="msg" placeholder="Сообщение в «${esc(grp.name)}»…" autocomplete="off" />
       <button id="send" class="icon send" aria-label="Отправить"><i class="ti ti-send"></i></button>
     </div>`;
@@ -1634,6 +1762,7 @@ function renderMain(): void {
     ginput.addEventListener("keydown", (e) => {
       if ((e as KeyboardEvent).key === "Enter") gsend();
     });
+    wireAttach(main);
     main.querySelector(".mx-back")?.addEventListener("click", goBack);
     $("#grpManage")?.addEventListener("click", () => openGroupAdmin(grp.id));
     // Clicking the group icon or title in the header also opens the management panel.
@@ -1668,12 +1797,14 @@ function renderMain(): void {
     </div>
     <div id="feed" class="feed"></div>
     <div class="inbar">
-      <button class="icon" aria-label="Вложение"><i class="ti ti-plus"></i></button>
+      <button id="attach" class="icon" title="Прикрепить файл" aria-label="Прикрепить файл"><i class="ti ti-plus"></i></button>
+      <input id="attachFile" type="file" multiple hidden />
       <input id="msg" placeholder="Сообщение… (шифруется на устройстве)" autocomplete="off" />
       <button class="icon ai" title="AI" aria-label="AI"><i class="ti ti-sparkles"></i></button>
       <button id="send" class="icon send" aria-label="Отправить"><i class="ti ti-send"></i></button>
     </div>`;
   renderFeed();
+  wireAttach(main);
   main.querySelector(".mx-back")?.addEventListener("click", goBack);
   const input = $("#msg") as HTMLInputElement;
   input.focus();
@@ -1687,6 +1818,18 @@ function renderMain(): void {
 function senderLabel(userId: string): string {
   const c = contacts.find((x) => x.userId === userId);
   return c ? c.name : shortId(userId);
+}
+
+// Render an attachment inside a bubble: inline preview for images, a download chip for other files.
+function attachMarkup(att: Attachment): string {
+  if (isImage(att.mime)) {
+    return `<a class="bubble-img" href="${att.data}" target="_blank" rel="noopener" title="${esc(att.name)}"><img src="${att.data}" alt="${esc(att.name)}" loading="lazy" /></a>`;
+  }
+  return `<a class="bubble-file" href="${att.data}" download="${esc(att.name)}">
+    <i class="ti ti-file mx-file-ic"></i>
+    <span class="mx-file-meta"><span class="mx-file-name">${esc(att.name)}</span><span class="mx-file-size">${fmtSize(att.size)}</span></span>
+    <i class="ti ti-download mx-file-dl"></i>
+  </a>`;
 }
 
 function renderFeed(): void {
@@ -1704,7 +1847,9 @@ function renderFeed(): void {
         grp && !m.mine && m.from
           ? `<div class="bubble-sender">${esc(senderLabel(m.from))}</div>`
           : "";
-      return `<div class="bubble ${m.mine ? "out" : "in"}">${sender}<span>${esc(m.text)}</span><time>${time}${tick}</time></div>`;
+      const body = m.att ? attachMarkup(m.att) : `<span>${esc(m.text)}</span>`;
+      const attCls = m.att ? (isImage(m.att.mime) ? " bubble--img" : " bubble--file") : "";
+      return `<div class="bubble ${m.mine ? "out" : "in"}${attCls}">${sender}${body}<time>${time}${tick}</time></div>`;
     })
     .join("");
   feed.scrollTop = feed.scrollHeight;
@@ -1841,12 +1986,14 @@ async function onIncoming(env: WireEnvelope): Promise<void> {
       return;
     }
 
-    if (app && app.t === "gtext") {
+    if (app && (app.t === "gtext" || app.t === "gfile")) {
       if (!findGroup(app.g)) {
         upsertGroup({ id: app.g, name: "Группа", kind: "group", members: [identity.userId, from] });
       }
+      const att = app.t === "gfile" ? { name: app.name, mime: app.mime, size: app.size, data: app.data } : undefined;
+      const gbody = app.t === "gfile" ? attachLabel(att!) : app.text;
       const gt = loadThread(app.g);
-      gt.push({ id: env.id, mine: false, text: app.text, ts: env.ts || Date.now(), from });
+      gt.push({ id: env.id, mine: false, text: gbody, ts: env.ts || Date.now(), from, att });
       saveThread(app.g);
       if (app.g === active) {
         renderFeed();
@@ -1857,11 +2004,13 @@ async function onIncoming(env: WireEnvelope): Promise<void> {
       return;
     }
 
-    // 1:1 text — {t:"text"} or a legacy raw string.
-    const body = app && app.t === "text" ? app.text : text;
+    // 1:1 — text {t:"text"}, file {t:"file"}, or a legacy raw string.
+    const att =
+      app && app.t === "file" ? { name: app.name, mime: app.mime, size: app.size, data: app.data } : undefined;
+    const body = att ? attachLabel(att) : app && app.t === "text" ? app.text : text;
     ensureContact(from);
     const t = loadThread(from);
-    t.push({ id: env.id, mine: false, text: body, ts: env.ts || Date.now() });
+    t.push({ id: env.id, mine: false, text: body, ts: env.ts || Date.now(), att });
     saveThread(from);
     if (from === active) {
       renderFeed();

@@ -186,6 +186,23 @@ html[data-wp="on"] .feed {
 .bubble time .ti { font-size: 13px; vertical-align: -2px; margin-left: 3px; }
 .bubble.in { align-self: flex-start; background: var(--bub-in-bg); color: var(--bub-in-txt); border-bottom-left-radius: 5px; }
 .bubble.out { align-self: flex-end; background: var(--bub-out-bg); color: var(--bub-out-txt); border-bottom-right-radius: 5px; }
+
+/* ---------- Attachments inside bubbles ---------- */
+/* Image bubbles drop their padding so the preview fills the rounded corners. */
+.bubble--img { padding: 4px; max-width: 260px; }
+.bubble-img { display: block; border-radius: 10px; overflow: hidden; }
+.bubble-img img { display: block; width: 100%; max-height: 320px; object-fit: cover; }
+.bubble--img time { padding: 0 6px 2px; }
+/* File chip: icon · name/size · download. */
+.bubble--file { max-width: 280px; }
+.bubble-file { display: flex; align-items: center; gap: 10px; text-decoration: none; color: inherit; }
+.mx-file-ic { font-size: 26px; opacity: .85; flex: 0 0 auto; }
+.mx-file-meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.mx-file-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mx-file-size { font-size: 11px; opacity: .7; margin-top: 1px; }
+.mx-file-dl { font-size: 18px; opacity: .7; flex: 0 0 auto; }
+.bubble-file:hover .mx-file-dl { opacity: 1; }
+
 .inbar { display: flex; gap: 10px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--chat-line); }
 .inbar input {
   flex: 1; padding: 11px 15px; border-radius: 19px; border: 1px solid var(--chat-line);
