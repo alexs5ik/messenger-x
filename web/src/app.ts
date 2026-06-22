@@ -11,6 +11,7 @@ import {
   type WireEnvelope,
 } from "./api";
 import { encrypt, decrypt, provisionAccount, pqStatus } from "./crypto";
+import { initDevice, isMobile, type DeviceClass } from "./device";
 
 interface Contact {
   userId: string;
@@ -300,6 +301,7 @@ function cycleTheme(): void {
 }
 
 export function mount(): void {
+  initDevice(onDeviceChange);
   applyTheme(currentTheme());
   // Self-heal: if stored data is from an older client (different format) or the device was
   // never provisioned with crypto secrets, wipe and start fresh so nothing silently breaks.
@@ -427,6 +429,7 @@ function startApp(): void {
   loadProfile();
   loadGroups();
   migrateGroups();
+  setMobileView("list"); // phones start on the chat list
   renderApp();
   socket = new MxSocket(identity!.token, onIncoming, (s) => {
     const dot = document.querySelector("#status") as HTMLElement | null;
@@ -1470,6 +1473,7 @@ function renderMain(): void {
     const admin = isGroupAdmin(grp);
     main.innerHTML = `
     <div class="chat-hd">
+      <button class="icon mx-back" aria-label="Назад"><i class="ti ti-arrow-left"></i></button>
       <div class="avatar sm mx-grp-av${admin ? " mx-hd-open" : ""}"${admin ? ' role="button" tabindex="0" aria-label="Управление" title="Управление"' : ""}><i class="ti ${KIND_ICON[grp.kind]}"></i></div>
       <div class="chat-hd-info${admin ? " mx-hd-open" : ""}"${admin ? ' role="button" tabindex="0" aria-label="Управление" title="Открыть управление"' : ""}>
         <div class="chat-name">${esc(grp.name)}</div>
@@ -1490,6 +1494,7 @@ function renderMain(): void {
     ginput.addEventListener("keydown", (e) => {
       if ((e as KeyboardEvent).key === "Enter") gsend();
     });
+    main.querySelector(".mx-back")?.addEventListener("click", goBack);
     $("#grpManage")?.addEventListener("click", () => openGroupAdmin(grp.id));
     // Clicking the group icon or title in the header also opens the management panel.
     if (admin) {
@@ -1512,6 +1517,7 @@ function renderMain(): void {
   const contact = contacts.find((c) => c.userId === active)!;
   main.innerHTML = `
     <div class="chat-hd">
+      <button class="icon mx-back" aria-label="Назад"><i class="ti ti-arrow-left"></i></button>
       <div class="avatar sm">${esc(contact.name.slice(0, 2).toUpperCase())}</div>
       <div class="chat-hd-info">
         <div class="chat-name">${esc(contact.name)}</div>
@@ -1528,6 +1534,7 @@ function renderMain(): void {
       <button id="send" class="icon send" aria-label="Отправить"><i class="ti ti-send"></i></button>
     </div>`;
   renderFeed();
+  main.querySelector(".mx-back")?.addEventListener("click", goBack);
   const input = $("#msg") as HTMLInputElement;
   input.focus();
   const send = () => sendMessage(input);
@@ -1563,11 +1570,28 @@ function renderFeed(): void {
   feed.scrollTop = feed.scrollHeight;
 }
 
+// On phones the list and the chat are separate full-screen views; this flag drives which one
+// is shown (CSS slides the chat over the list). No effect on desktop (both panes visible).
+function setMobileView(v: "list" | "chat"): void {
+  document.documentElement.dataset.view = v;
+}
+// When the viewport crosses between mobile and desktop (resize, rotate, devtools), reset the
+// single-pane mobile view so the desktop two-pane layout isn't left stuck on the chat screen.
+function onDeviceChange(_d: DeviceClass): void {
+  if (!isMobile()) setMobileView("list");
+}
+// Mobile "back": return from an open chat to the chat list.
+function goBack(): void {
+  setMobileView("list");
+}
+
 function selectPeer(id: string): void {
   active = id;
   unread.delete(id);
   renderContacts();
   renderMain();
+  setMobileView("chat"); // on phones, slide into the chat view
+
   // Keep the group admin panel in sync with the active chat.
   const g = findGroup(id);
   if (g && isGroupAdmin(g) && isGroupPinned()) {

@@ -61,12 +61,21 @@ body {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
-#app { height: 100vh; }
+#app {
+  height: 100vh;            /* fallback */
+  height: calc(var(--app-vh, 1vh) * 100);
+  height: 100dvh;
+}
 button { font-family: inherit; cursor: pointer; }
 input { font-family: inherit; }
 
 /* ---------- Login ---------- */
-.login { height: 100vh; display: grid; place-items: center; padding: 20px; }
+.login {
+  height: 100vh;            /* fallback */
+  height: calc(var(--app-vh, 1vh) * 100);
+  height: 100dvh;
+  display: grid; place-items: center; padding: 20px;
+}
 .login-card {
   width: 360px; background: var(--card-bg); color: var(--card-txt);
   border: 1px solid var(--side-line); border-radius: 20px; padding: 30px; text-align: center;
@@ -88,7 +97,12 @@ button.primary {
 button.primary:hover { filter: brightness(1.1); }
 
 /* ---------- App layout ---------- */
-.app { height: 100vh; display: flex; }
+.app {
+  height: 100vh;            /* fallback */
+  height: calc(var(--app-vh, 1vh) * 100);
+  height: 100dvh;
+  display: flex;
+}
 .side {
   width: 288px; flex: 0 0 288px; background: var(--side-bg); color: var(--side-txt);
   border-right: 1px solid var(--side-line); display: flex; flex-direction: column;
@@ -185,7 +199,10 @@ button.primary:hover { filter: brightness(1.1); }
 .mx-wrap.open .mx-backdrop { opacity: 1; pointer-events: auto; }
 
 .mx-panel {
-  position: fixed; top: 0; right: 0; height: 100vh; width: 392px; max-width: 92vw; z-index: 91;
+  position: fixed; top: 0; right: 0; width: 392px; max-width: 92vw; z-index: 91;
+  height: 100vh;            /* fallback */
+  height: calc(var(--app-vh, 1vh) * 100);
+  height: 100dvh;
   background: var(--side-bg); color: var(--side-txt); border-left: 1px solid var(--side-line);
   box-shadow: -24px 0 60px -24px rgba(0,0,0,.45); display: flex; flex-direction: column;
   transform: translateX(100%); transition: transform .26s cubic-bezier(.22,.61,.36,1); will-change: transform;
@@ -374,7 +391,10 @@ button.mx-row:hover { background: var(--side-hover); }
 }
 .mx-gwrap.open .mx-gbackdrop { opacity: 1; }
 .mx-gpanel {
-  position: absolute; top: 0; left: 0; height: 100vh; width: 340px; max-width: 86vw;
+  position: absolute; top: 0; left: 0; width: 340px; max-width: 86vw;
+  height: 100vh;            /* fallback */
+  height: calc(var(--app-vh, 1vh) * 100);
+  height: 100dvh;
   background: var(--side-bg); color: var(--side-txt); border-right: 1px solid var(--side-line);
   box-shadow: 24px 0 60px -24px rgba(0,0,0,.45);
   transform: translateX(-100%); transition: transform .26s cubic-bezier(.22,.61,.36,1); will-change: transform;
@@ -503,3 +523,43 @@ button.mx-row:hover { background: var(--side-hover); }
   display: grid; place-items: center; flex: 0 0 auto;
 }
 .mx-announce__close:hover { color: var(--card-txt); }
+
+/* ---------- Mobile (phones): one screen at a time ---------- */
+/* Back button shows only on small screens. */
+.mx-back { display: none; }
+@media (max-width: 700px) {
+  .app { position: relative; overflow: hidden; }
+  /* List fills the screen; the chat slides in over it. */
+  .side { width: 100%; flex: 0 0 100%; border-right: none; }
+  .main {
+    position: absolute; inset: 0; width: 100%;
+    transform: translateX(100%);
+    transition: transform 0.25s ease; z-index: 6;
+  }
+  html[data-view="chat"] .main { transform: translateX(0); }
+  .mx-back { display: grid; }
+  /* Bigger tap targets + comfortable input on touch. */
+  .side-hd { padding: 14px 12px; }
+  .contact { padding: 11px 8px; }
+  .inbar input { font-size: 16px; } /* 16px stops iOS auto-zoom on focus */
+  .login-card { width: 100%; max-width: 360px; }
+  /* Side panels go full-screen on phones. */
+  .mx-panel, .mx-gpanel { width: 100%; max-width: 100%; }
+  /* The docked (pinned) group-admin layout doesn't apply on a phone — it's a full overlay. */
+  .app.app--gpinned { padding-left: 0; }
+  .mx-admin { padding: 14px; }
+  .mx-admin__stats { grid-template-columns: 1fr 1fr; }
+  /* Safe-area insets (notch / home indicator) so content clears system UI. */
+  .inbar { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .login { padding-bottom: calc(20px + env(safe-area-inset-bottom)); padding-top: calc(20px + env(safe-area-inset-top)); }
+  .side-hd { padding-top: calc(14px + env(safe-area-inset-top)); }
+}
+
+/* ---------- Device-class tuning (set by device.ts) ---------- */
+/* device.ts writes html[data-device] / html[data-touch] from real device detection.
+   These rules refine the automatic layout; desktop (data-device="desktop") stays unchanged. */
+html[data-device="tablet"] .side { width: 248px; flex-basis: 248px; }
+html[data-device="tablet"] .contact { padding: 10px 8px; }
+
+html[data-touch="true"] input { font-size: 16px; } /* 16px stops iOS auto-zoom on focus */
+html[data-touch="true"] .icon { width: 40px; height: 40px; }
