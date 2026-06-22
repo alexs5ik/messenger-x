@@ -86,7 +86,7 @@ input { font-family: inherit; }
 .hint { color: var(--side-txt2); font-size: 12px; margin-top: 14px; line-height: 1.5; }
 .login-card input {
   width: 100%; margin: 20px 0 12px; padding: 12px 14px; border-radius: var(--radius-sm);
-  border: 1px solid var(--side-line); background: var(--field-bg); color: var(--card-txt); font-size: 15px; outline: none;
+  border: 1px solid var(--side-line); background: var(--field-bg); color: var(--chat-txt); font-size: 15px; outline: none;
 }
 .login-card input:focus { border-color: var(--accent); }
 button.primary {
