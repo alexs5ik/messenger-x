@@ -35,6 +35,16 @@ pub struct User {
     /// password reset): the client must force the user to choose a new password on next login.
     #[serde(default)]
     pub must_change_password: bool,
+    /// Editable display name shown to the user (synced across their devices). `None` falls back
+    /// to the username/identifier on the client.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Free-text status line (e.g. "в сети", "на встрече").
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Avatar as a data: URL (downscaled image). Synced across devices like the rest of the profile.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 impl User {
@@ -47,6 +57,9 @@ impl User {
             phone: None,
             password_hash: None,
             must_change_password: false,
+            display_name: None,
+            status: None,
+            avatar: None,
         }
     }
 
@@ -59,6 +72,9 @@ impl User {
             phone: None,
             password_hash: None,
             must_change_password: false,
+            display_name: None,
+            status: None,
+            avatar: None,
         }
     }
 

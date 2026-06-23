@@ -81,6 +81,27 @@ impl InMemoryUserStore {
         st.users.values().find(|u| u.username == username).cloned()
     }
 
+    /// Replace a user's editable profile (display name, status, avatar). Returns `false` if the
+    /// user does not exist.
+    pub async fn set_profile(
+        &self,
+        id: UserId,
+        display_name: Option<String>,
+        status: Option<String>,
+        avatar: Option<String>,
+    ) -> bool {
+        let mut st = self.inner.write().await;
+        match st.users.get_mut(&id) {
+            Some(u) => {
+                u.display_name = display_name;
+                u.status = status;
+                u.avatar = avatar;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Set (or clear) a user's password hash and the must-change flag. Returns `false` if the
     /// user does not exist.
     pub async fn set_password(&self, id: UserId, hash: Option<String>, must_change: bool) -> bool {

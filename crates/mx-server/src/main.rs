@@ -642,6 +642,20 @@ async fn reset_password(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Resolve the authenticated user from an `Authorization: Bearer <token>` header.
+fn bearer_user(state: &AppState, headers: &HeaderMap) -> Result<UserId, ApiError> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or(ApiError(Error::Unauthorized))?;
+    state
+        .auth
+        .verify_token(token, now_ms())
+        .map(|c| c.user)
+        .map_err(|_| ApiError(Error::Unauthorized))
+}
+
 /// Set a new password for the authenticated session (forced change after an SMS temp password, or
 /// a voluntary change). Authenticated by the `Authorization: Bearer <token>` header.
 async fn change_password(
@@ -649,18 +663,54 @@ async fn change_password(
     headers: HeaderMap,
     Json(req): Json<ChangeRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or_else(|| ApiError(Error::Unauthorized))?;
-    let claims = state
-        .auth
-        .verify_token(token, now_ms())
-        .map_err(|_| ApiError(Error::Unauthorized))?;
+    let user = bearer_user(&state, &headers)?;
     check_password_policy(req.password.trim())?;
     let hash = hash_password(req.password.trim())?;
-    if !state.users.set_password(claims.user, Some(hash), false).await {
+    if !state.users.set_password(user, Some(hash), false).await {
+        return Err(ApiError(Error::NotFound("user".into())));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The editable, cross-device profile (display name, status, avatar).
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct ProfileDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
+}
+
+/// `GET /v1/profile` — the authenticated user's editable profile (synced across their devices).
+async fn get_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ProfileDto>, ApiError> {
+    let user = bearer_user(&state, &headers)?;
+    let u = state.users.get_user(user).await?;
+    Ok(Json(ProfileDto {
+        name: u.display_name,
+        status: u.status,
+        avatar: u.avatar,
+    }))
+}
+
+/// `PUT /v1/profile` — replace the authenticated user's editable profile.
+async fn put_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ProfileDto>,
+) -> Result<StatusCode, ApiError> {
+    let user = bearer_user(&state, &headers)?;
+    // Normalize empty strings to None so a cleared field round-trips as "unset".
+    let norm = |s: Option<String>| s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if !state
+        .users
+        .set_profile(user, norm(req.name), norm(req.status), req.avatar)
+        .await
+    {
         return Err(ApiError(Error::NotFound("user".into())));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1111,6 +1161,7 @@ fn app(state: AppState) -> Router {
         .route("/v1/auth/forgot", post(forgot_password))
         .route("/v1/auth/reset", post(reset_password))
         .route("/v1/auth/change", post(change_password))
+        .route("/v1/profile", get(get_profile).put(put_profile))
         .route("/v1/prekeys", post(publish_prekeys))
         .route("/v1/prekeys/:device", get(fetch_prekeys))
         .route("/v1/users/:user/prekey", get(fetch_user_prekey))

@@ -139,6 +139,30 @@ export async function changePassword(token: string, password: string): Promise<v
   if (!res.ok) throw new Error(await errText(res, "change"));
 }
 
+// The server-stored, cross-device profile (display name, status, avatar data URL).
+export interface RemoteProfile {
+  name?: string;
+  status?: string;
+  avatar?: string;
+}
+
+// Fetch the authenticated user's profile (synced across their devices).
+export async function getProfile(token: string): Promise<RemoteProfile> {
+  const res = await fetch("/v1/profile", { headers: { authorization: `Bearer ${token}` } });
+  if (!res.ok) throw new Error(await errText(res, "profile"));
+  return (await res.json()) as RemoteProfile;
+}
+
+// Replace the authenticated user's profile on the server.
+export async function putProfile(token: string, p: RemoteProfile): Promise<void> {
+  const res = await fetch("/v1/profile", {
+    method: "PUT",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify(p),
+  });
+  if (!res.ok) throw new Error(await errText(res, "profile"));
+}
+
 // Pull the server's `{"error": "..."}` message out of a failed response for a friendlier alert.
 async function errText(res: Response, what: string): Promise<string> {
   try {

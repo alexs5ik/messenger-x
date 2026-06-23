@@ -7,6 +7,8 @@ import {
   forgotPassword,
   resetPassword,
   changePassword,
+  getProfile,
+  putProfile,
   publishPrekeys,
   adminFetch,
   MxSocket,
@@ -117,6 +119,60 @@ function loadProfile(): void {
 }
 function saveProfile(): void {
   localStorage.setItem(LS.profile, JSON.stringify(profile));
+  void pushProfile(); // mirror to the server so other devices see the change
+}
+// Push the local profile to the server (best-effort; ignored when offline/not signed in).
+async function pushProfile(): Promise<void> {
+  if (!identity) return;
+  try {
+    await putProfile(identity.token, {
+      name: profile.name,
+      status: profile.status,
+      avatar: profile.avatar,
+    });
+  } catch {
+    /* offline — will re-sync on the next edit */
+  }
+}
+// On login, reconcile the local profile with the server's (the cross-device source of truth):
+// adopt the server copy if it has data; otherwise migrate this device's existing profile up.
+async function hydrateProfile(): Promise<void> {
+  if (!identity) return;
+  try {
+    const rp = await getProfile(identity.token);
+    const remoteHasData = !!(rp.name || rp.status || rp.avatar);
+    const localHasData = !!(profile.name || profile.status || profile.avatar);
+    if (remoteHasData) {
+      profile = { name: rp.name, status: rp.status, avatar: rp.avatar };
+      localStorage.setItem(LS.profile, JSON.stringify(profile));
+      refreshSelfHeader();
+    } else if (localHasData) {
+      await pushProfile();
+    }
+  } catch {
+    /* offline — keep the local profile */
+  }
+}
+// Reflect the current profile in the sidebar header (avatar, name, status line).
+function refreshSelfHeader(): void {
+  const meAv = document.querySelector("#meAvatar") as HTMLElement | null;
+  if (meAv) meAv.innerHTML = avatarInner(profile.avatar, selfInitials());
+  const meName = document.querySelector(".me-name") as HTMLElement | null;
+  if (meName) meName.textContent = displayName();
+  const meInfo = document.querySelector(".me-info") as HTMLElement | null;
+  if (!meInfo) return;
+  let st = meInfo.querySelector("#meStatus") as HTMLElement | null;
+  if (profile.status) {
+    if (!st) {
+      st = document.createElement("div");
+      st.id = "meStatus";
+      st.className = "me-status";
+      meInfo.insertBefore(st, meInfo.querySelector("#status"));
+    }
+    st.textContent = profile.status;
+  } else if (st) {
+    st.remove();
+  }
 }
 function displayName(): string {
   return profile.name?.trim() || identity!.username;
@@ -805,6 +861,10 @@ function startApp(): void {
   // Returning user: re-announce our prekey bundle so a server that lost its directory (restart or
   // redeploy on an ephemeral host) can still hand it to peers who want to message us. Best-effort.
   void republishPrekeys();
+
+  // Pull the cross-device profile (name/status/avatar) from the server so a change made on another
+  // device shows up here too.
+  void hydrateProfile();
 
   // Prove the post-quantum crypto core runs in-browser (wasm) and reflect it in the badge.
   void pqStatus().then((s) => {
