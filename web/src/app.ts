@@ -530,6 +530,31 @@ function pwPolicyError(pw: string): string | null {
 function loginPlaceholder(method: RegisterMethod): string {
   return method === "email" ? "you@example.com" : method === "phone" ? "+7 900 000-00-00" : "Ваше имя";
 }
+// A password input with a show/hide "eye" toggle. `wirePwToggles` must be called after the
+// markup is inserted to activate the toggles.
+function pwField(id: string, placeholder: string, autocomplete: string): string {
+  return `<div class="pw-wrap">
+    <input id="${id}" type="password" placeholder="${placeholder}" autocomplete="${autocomplete}" />
+    <button class="pw-eye" type="button" data-eye="${id}" tabindex="-1" aria-label="Показать пароль" title="Показать пароль"><i class="ti ti-eye"></i></button>
+  </div>`;
+}
+// Activate every .pw-eye toggle in `scope`: flips the linked input between password/text.
+function wirePwToggles(scope: ParentNode = document): void {
+  scope.querySelectorAll<HTMLElement>(".pw-eye").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const input = document.getElementById(btn.dataset.eye!) as HTMLInputElement | null;
+      if (!input) return;
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      btn.querySelector("i")!.className = reveal ? "ti ti-eye-off" : "ti ti-eye";
+      const label = reveal ? "Скрыть пароль" : "Показать пароль";
+      btn.setAttribute("aria-label", label);
+      btn.setAttribute("title", label);
+      input.focus();
+    }),
+  );
+}
+
 // Wrap login-screen content in the branded card.
 function loginShell(inner: string): string {
   return `<div class="login"><div class="login-card">
@@ -569,7 +594,7 @@ function renderLogin(): void {
       </div>`
       }
       <input id="uname" type="${method === "email" ? "email" : method === "phone" ? "tel" : "text"}" placeholder="${loginPlaceholder(method)}" autocomplete="off" />
-      ${isName ? "" : `<input id="pw" type="password" placeholder="Пароль" autocomplete="${mode === "register" ? "new-password" : "current-password"}" />`}
+      ${isName ? "" : pwField("pw", "Пароль", mode === "register" ? "new-password" : "current-password")}
       ${!isName && mode === "register" ? `<p class="hint pw-hint">${PW_HINT}</p>` : ""}
       <button id="go" class="primary"><i class="ti ti-arrow-right"></i> ${isName ? "Продолжить" : mode === "login" ? "Войти" : "Зарегистрироваться"}</button>
       ${!isName && mode === "login" ? `<button id="forgot" class="login-link" type="button">Забыли пароль?</button>` : ""}
@@ -583,6 +608,7 @@ function renderLogin(): void {
       .querySelectorAll<HTMLElement>(".login-tab")
       .forEach((b) => b.addEventListener("click", () => ((mode = b.dataset.mode as "login" | "register"), draw())));
 
+    wirePwToggles(root());
     const input = $("#uname") as HTMLInputElement;
     const pw = document.querySelector("#pw") as HTMLInputElement | null;
     const hint = $("#loginhint");
@@ -665,12 +691,13 @@ function renderResetForm(token: string, email: string): void {
   root().innerHTML = loginShell(`
     <p class="muted">Новый пароль для ${esc(email)}</p>
     <p class="hint hint--left">Демо: «ссылка из письма» — токен <b>${esc(token.slice(0, 10))}…</b>. В реальном проекте ссылка приходит на почту.</p>
-    <input id="np" type="password" placeholder="Новый пароль" autocomplete="new-password" />
+    ${pwField("np", "Новый пароль", "new-password")}
     <p class="hint pw-hint">${PW_HINT}</p>
     <button id="rgo" class="primary"><i class="ti ti-check"></i> Сохранить пароль</button>
     <button id="rback" class="login-link" type="button">← Назад ко входу</button>
     <p class="hint" id="rhint"></p>
   `);
+  wirePwToggles(root());
   const np = $("#np") as HTMLInputElement;
   const hint = $("#rhint");
   np.focus();
@@ -719,11 +746,12 @@ function renderPhoneReset(phone: string, temp: string): void {
 function renderChangeForm(id: Identity): void {
   root().innerHTML = loginShell(`
     <p class="muted">Придумайте новый пароль</p>
-    <input id="cp" type="password" placeholder="Новый пароль" autocomplete="new-password" />
+    ${pwField("cp", "Новый пароль", "new-password")}
     <p class="hint pw-hint">${PW_HINT}</p>
     <button id="cgo" class="primary"><i class="ti ti-check"></i> Сохранить и войти</button>
     <p class="hint" id="chint"></p>
   `);
+  wirePwToggles(root());
   const cp = $("#cp") as HTMLInputElement;
   const hint = $("#chint");
   cp.focus();

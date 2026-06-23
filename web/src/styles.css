@@ -522,6 +522,15 @@ button.mx-row:hover { background: var(--side-hover); }
 .login-link:hover { color: var(--accent); }
 .hint--left { text-align: left; }
 .pw-hint { margin-top: 6px; text-align: left; }
+/* Password field with show/hide eye */
+.pw-wrap { position: relative; margin: 20px 0 12px; }
+.login-card .pw-wrap input { margin: 0; padding-right: 44px; }
+.pw-eye {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 34px; height: 34px; border: none; background: transparent; color: var(--side-txt2);
+  display: grid; place-items: center; font-size: 18px; border-radius: var(--radius-sm);
+}
+.pw-eye:hover { color: var(--card-txt); }
 /* Generated demo password / code block */
 .otp-code {
   margin: 6px 0 4px; padding: 12px; border-radius: var(--radius-sm); border: 1px dashed var(--accent);
