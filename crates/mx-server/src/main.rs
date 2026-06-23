@@ -50,7 +50,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -68,6 +68,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use mx_ai::AiOrchestrator;
 use mx_auth::AuthService;
@@ -1191,7 +1192,15 @@ fn app(state: AppState) -> Router {
         tracing::info!(dir = ?web_dir, "no static frontend dir; API-only mode");
     }
 
-    router.with_state(state)
+    // Force revalidation of every response (notably index.html) so a redeploy's new asset hashes
+    // are picked up on the next load instead of being shadowed by a stale browser cache. The
+    // hashed JS/CSS still revalidate cheaply via ETag/Last-Modified (304 when unchanged).
+    router
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ))
+        .with_state(state)
 }
 
 // ===========================================================================
